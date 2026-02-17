@@ -102,8 +102,7 @@ def is_google_connected() -> bool:
         creds = get_google_credentials()
         return creds is not None and creds.valid
     except Exception:
-        return False
-```
+       return False
 
 
 def get_gmail_service():
