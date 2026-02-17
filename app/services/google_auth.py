@@ -96,6 +96,16 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 
+def is_google_connected() -> bool:
+    """Check if Google OAuth credentials are available and valid."""
+    try:
+        creds = get_google_credentials()
+        return creds is not None and creds.valid
+    except Exception:
+        return False
+```
+
+
 def get_gmail_service():
     """Get an authenticated Gmail API service."""
     creds = get_google_credentials()
