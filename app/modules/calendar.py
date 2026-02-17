@@ -42,7 +42,7 @@ async def handle_calendar(
     start_time = data.get("start")
     end_time = data.get("end")
     location = data.get("location")
-    should_notify_partner = data.get("notify_partner", False)
+    should_notify_partner = True
 
     # --- Step 1: Save to our database ---
     entry = Entry(
