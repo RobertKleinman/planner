@@ -64,19 +64,18 @@ async def setup_user(db: Session = Depends(get_db)):
     """One-time user setup using PLANNER_API_KEY from environment."""
     existing = db.query(models.User).first()
     if existing:
-        return {"message": "User already exists", "username": existing.username}
+        return {"message": "User already exists", "email": existing.email}
 
     api_key = os.environ.get("PLANNER_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="PLANNER_API_KEY not set")
 
     user = models.User(
-        username="rob",
         email="robertmkleinman@gmail.com",
-        full_name="Rob Kleinman",
+        name="Rob Kleinman",
         api_key_hash=hash_api_key(api_key),
         is_active=True,
     )
     db.add(user)
     db.commit()
-    return {"message": "User created", "username": "rob"}
+    return {"message": "User created", "email": "robertmkleinman@gmail.com"}
