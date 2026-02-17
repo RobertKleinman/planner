@@ -10,3 +10,5 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+token_oneline.txt
+creds_oneline.txt
