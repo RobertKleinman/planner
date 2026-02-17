@@ -1,0 +1,12 @@
+.env
+*.db
+token.json
+credentials.json
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+.vscode/
+.idea/
+.DS_Store
