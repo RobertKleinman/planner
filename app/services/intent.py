@@ -1,14 +1,6 @@
 """
 intent.py — LLM Intent Classification & Data Extraction (Multimodal)
 =====================================================================
-WHAT CHANGED FROM V1:
-- Now handles BOTH text and images (Claude's vision capability)
-- Module list expanded to cover all planned modules
-- classify_intent() accepts optional image_bytes for screenshot analysis
-- The system prompt defines all module types and their data schemas
-
-This is still the brain of the system. The quality of everything downstream
-depends on how well this prompt works. We'll iterate on it.
 """
 
 import json
@@ -27,23 +19,44 @@ INTENT_SYSTEM_PROMPT = """You are the brain of a personal planner system. You re
 
 ## Available Modules
 
-- **memo**: General note, thought, idea, or reminder to self. DEFAULT if nothing else fits.
-- **calendar**: They want to create a calendar event. Extract title, start time, end time, location, whether to notify their partner.
+- **memo**: General note, thought, or reminder to self. DEFAULT if nothing else fits.
+- **calendar**: They want to create a calendar event. Extract title, start time, end time, location.
 - **diary**: A personal diary/journal entry about their day, feelings, experiences. Usually longer and reflective.
-- **task**: A work task or to-do item. Extract description, due date, project name if mentioned.
+- **task**: Action items, to-do items, things they need to do, errands, things to remember to do. This includes:
+  - Creating new tasks: "I need to pick up dry cleaning and buy dog food"
+  - Completing tasks: "I finished picking up the dry cleaning" or "done with the dry cleaning"
+  - Any list of things that need doing
+  - Errands, chores, action items, follow-ups
 - **screenshot_note**: Input is from an image/screenshot. Extract and organize the visible information.
 - **expense**: Money spent. Extract amount, currency (default CAD), category, vendor/store.
-- **food**: Food eaten. Extract meal type (breakfast/lunch/dinner/snack), items, approximate calories if obvious.
+- **food**: Food eaten. Extract meal type, items, approximate calories if obvious.
 - **mood**: How they're feeling. Extract mood rating (1-10), any triggers or context mentioned.
-- **idea**: A business idea, project idea, or creative concept. Extract the core concept and any action steps.
-- **gym**: Exercise or workout. Extract exercise names, sets, reps, weight, duration, type (cardio/strength).
-- **work**: Work accomplishment, project update, or professional note. Extract project name, what was done, any metrics.
+- **idea**: A business idea, project idea, or creative concept.
+- **gym**: Exercise or workout. Extract exercise names, sets, reps, weight, duration.
+- **work**: Work accomplishment, project update, or professional note.
 
-## Rules
+## Task Classification Rules
+
+Be generous with task classification. If someone says they "need to", "should", "have to", "gotta", "want to" do something — that's a task, not a memo. If they list multiple things — that's tasks.
+
+When creating tasks, you MUST:
+- Split multiple items into separate tasks in the "tasks" array
+- Assign a GROUP (category) to organize them. Use short labels like: "Errands", "House", "Work", "Health", "Dogs", "Personal", "Finance", "Shopping", etc. If the user says "for the house:" or "work stuff:", use that as the group. Otherwise infer the best group.
+- Assign a PRIORITY based on urgency cues:
+  - "urgent" — words like "urgent", "ASAP", "emergency", "critical", "the leak is getting worse"
+  - "do_today" — words like "today", "need to", "gotta", "should really", "before tonight"
+  - "this_week" — words like "this week", "soon", "before Friday", "need to get around to"
+  - "keep_in_mind" — words like "at some point", "eventually", "whenever", "would be nice", "sometime"
+  - Default to "this_week" if unclear
+- Extract due dates when mentioned (as ISO 8601 datetime strings)
+
+When completing tasks, set action to "complete" and list what was completed in the "completed" array. Matching is fuzzy so just extract the key description words.
+
+## General Rules
 
 - Current date and time: {current_datetime}
 - Timezone: {timezone}
-- Resolve relative dates: "tomorrow", "next Monday", "in 2 hours" → ISO 8601 datetime strings.
+- Resolve relative dates: "tomorrow", "next Monday", "in 2 hours" -> ISO 8601 datetime strings.
 - If no end time for calendar events, assume 1 hour duration.
 - Be generous: "dentist at 2" = calendar event, not a memo.
 - "I feel..." or emotional content = mood or diary depending on length.
@@ -61,12 +74,15 @@ Respond with ONLY valid JSON (no markdown, no backticks). Use this structure:
   "spoken_response": "Brief conversational confirmation",
   "data": {{
     // Module-specific fields — include only relevant ones:
-    
+
     // calendar: {{"title": "...", "start": "ISO datetime", "end": "ISO datetime", "location": null, "notify_partner": true|false}}
     // memo: {{"content": "the memo text"}}
     // diary: {{"content": "diary entry text", "highlights": ["key moment 1", "key moment 2"]}}
-    // task: {{"description": "...", "due": "ISO datetime"|null, "project": "project name"|null}}
-    // screenshot_note: {{"content": "extracted/organized information from the image", "source_type": "receipt|schedule|notes|message|other"}}
+
+    // task (creating): {{"action": "create", "tasks": [{{"description": "pick up dry cleaning", "group": "Errands", "priority": "do_today", "due": null}}, {{"description": "buy dog food", "group": "Errands", "priority": "this_week", "due": null}}] }}
+    // task (completing): {{"action": "complete", "completed": ["dry cleaning", "dog food"]}}
+
+    // screenshot_note: {{"content": "extracted info", "source_type": "receipt|schedule|notes|message|other"}}
     // expense: {{"amount": 42.50, "currency": "CAD", "category": "groceries|dining|transport|health|entertainment|shopping|bills|other", "vendor": "store name"|null, "items": ["item1"]|null}}
     // food: {{"meal": "breakfast|lunch|dinner|snack", "items": ["item1", "item2"], "calories_estimate": null}}
     // mood: {{"rating": 7, "triggers": ["trigger1"], "notes": "additional context"}}
@@ -84,14 +100,6 @@ async def classify_intent(
 ) -> dict:
     """
     Send text and/or image to Claude for intent classification.
-
-    Args:
-        transcript: Text input (from transcription or direct text).
-        image_bytes: Raw image bytes (from screenshot or photo upload).
-        image_media_type: MIME type of the image.
-
-    Returns:
-        Dict with: module, title, spoken_response, data
     """
     current_dt = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
     system = INTENT_SYSTEM_PROMPT.format(
@@ -99,12 +107,9 @@ async def classify_intent(
         timezone=settings.timezone,
     )
 
-    # Build the message content — can be text, image, or both.
-    # Claude's API accepts a list of content blocks for multimodal input.
     content = []
 
     if image_bytes:
-        # Encode image as base64 for Claude's vision API
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
         content.append({
             "type": "image",
@@ -118,7 +123,6 @@ async def classify_intent(
     if transcript:
         content.append({"type": "text", "text": transcript})
     elif not image_bytes:
-        # No input at all — shouldn't happen but handle gracefully
         return {
             "module": "memo",
             "title": "Empty Input",
@@ -126,7 +130,6 @@ async def classify_intent(
             "data": {"content": ""},
         }
 
-    # If only image, no text, add a prompt asking Claude to analyze it
     if image_bytes and not transcript:
         content.append({
             "type": "text",
@@ -145,7 +148,6 @@ async def classify_intent(
     try:
         result = json.loads(raw_text)
     except json.JSONDecodeError:
-        # Fallback: treat as a plain memo
         result = {
             "module": "memo",
             "title": "Voice Memo",
