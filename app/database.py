@@ -2,7 +2,6 @@
 database.py — Database Connection & Session Management
 ========================================================
 Works with both SQLite (local dev) and PostgreSQL (Railway).
-Detects which one based on the DATABASE_URL.
 """
 
 from sqlalchemy import create_engine
@@ -12,16 +11,13 @@ from app.config import settings
 
 database_url = settings.database_url
 
-# PostgreSQL fix: Railway gives "postgres://" but SQLAlchemy needs "postgresql://"
+# Railway gives "postgres://" but SQLAlchemy needs "postgresql://"
 if database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
 
 # SQLite needs check_same_thread=False; PostgreSQL does not
 if database_url.startswith("sqlite"):
-    engine = create_engine(
-        database_url,
-        connect_args={"check_same_thread": False}
-    )
+    engine = create_engine(database_url, connect_args={"check_same_thread": False})
 else:
     engine = create_engine(database_url)
 

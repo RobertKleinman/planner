@@ -1,12 +1,6 @@
 """
 models.py — Database Table Definitions
 ========================================
-Every input becomes an Entry. What makes them different is:
-  - The `module` field ("memo", "calendar", "task", etc.)
-  - The `module_data` JSON field (holds module-specific structured data)
-  - How the dashboard displays them
-
-For modules that need extra relational data, we add small linked tables.
 """
 
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
@@ -48,6 +42,8 @@ class Entry(Base):
     user = relationship("User", back_populates="entries")
     calendar_event = relationship("CalendarEvent", back_populates="entry", uselist=False)
     task = relationship("Task", back_populates="entry", uselist=False)
+    remember_item = relationship("RememberItem", back_populates="entry", uselist=False)
+    journal_entry = relationship("JournalEntry", back_populates="entry", uselist=False)
 
 
 class CalendarEvent(Base):
@@ -68,17 +64,6 @@ class CalendarEvent(Base):
 
 
 class Task(Base):
-    """
-    Tracks individual tasks with grouping, priority, and completion.
-
-    Priority levels:
-      - urgent: needs immediate attention
-      - do_today: should happen today
-      - this_week: needs doing soon
-      - keep_in_mind: no rush, don't forget
-
-    Status: open, done
-    """
     __tablename__ = "tasks"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -93,3 +78,39 @@ class Task(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     entry = relationship("Entry", back_populates="task")
+
+
+class RememberItem(Base):
+    """
+    Things to remember — facts, preferences, references, info to keep handy.
+    Categorized and searchable from the dashboard.
+    """
+    __tablename__ = "remember_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    entry_id = Column(Integer, ForeignKey("entries.id"), nullable=False)
+
+    content = Column(Text, nullable=False)
+    category = Column(String, nullable=False, default="General", index=True)
+    tags = Column(String, nullable=True)  # Comma-separated tags
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    entry = relationship("Entry", back_populates="remember_item")
+
+
+class JournalEntry(Base):
+    """
+    Daily journal — activities grouped by day and by topic/project.
+    """
+    __tablename__ = "journal_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    entry_id = Column(Integer, ForeignKey("entries.id"), nullable=False)
+
+    content = Column(Text, nullable=False)
+    activity_type = Column(String, nullable=True)  # "work", "social", "health", "errands", etc.
+    topic = Column(String, nullable=True, index=True)  # Project or recurring topic
+    date = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    entry = relationship("Entry", back_populates="journal_entry")
