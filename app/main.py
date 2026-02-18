@@ -43,9 +43,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from app.routers import input, entries
+from app.routers import input, entries, dashboard
 app.include_router(input.router)
 app.include_router(entries.router)
+app.include_router(dashboard.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
