@@ -1,6 +1,5 @@
 """
 modules/task.py — Task Module
-================================
 """
 
 import json
@@ -14,20 +13,12 @@ from app.config import settings
 client = Anthropic(api_key=settings.anthropic_api_key)
 
 
-async def handle_task(
-    user: User,
-    raw_input: str,
-    intent_data: dict,
-    db: Session,
-    input_type: str = "audio",
-    image_description: str = None,
-) -> InputResponse:
+async def handle_task(user, raw_input, intent_data, db, input_type="audio", image_description=None):
     data = intent_data.get("data", {})
     action = data.get("action", "create")
     if action == "complete":
         return await _complete_tasks(user, raw_input, intent_data, db, input_type)
-    else:
-        return await _create_tasks(user, raw_input, intent_data, db, input_type, image_description)
+    return await _create_tasks(user, raw_input, intent_data, db, input_type, image_description)
 
 
 async def _create_tasks(user, raw_input, intent_data, db, input_type, image_description=None):
@@ -39,7 +30,7 @@ async def _create_tasks(user, raw_input, intent_data, db, input_type, image_desc
     if not tasks_data and data.get("description"):
         tasks_data = [{"description": data["description"], "group": data.get("group", default_group), "priority": data.get("priority", default_priority), "due": data.get("due")}]
 
-    existing_groups = [g[0] for g in db.query(Task.group).join(Entry).filter(Entry.user_id == user.id).distinct().all() if g[0]]
+    existing_groups = [g[0] for g in db.query(Task.group).join(Entry).filter(Entry.user_id == user.id, Entry.deleted_at.is_(None)).distinct().all() if g[0]]
 
     created_tasks = []
     first_entry_id = None
@@ -59,9 +50,7 @@ async def _create_tasks(user, raw_input, intent_data, db, input_type, image_desc
             title=task_data.get("description", "Task"),
             module="task", module_data=json.dumps(task_data),
         )
-        db.add(entry)
-        db.commit()
-        db.refresh(entry)
+        db.add(entry); db.commit(); db.refresh(entry)
         if first_entry_id is None:
             first_entry_id = entry.id
 
@@ -71,8 +60,7 @@ async def _create_tasks(user, raw_input, intent_data, db, input_type, image_desc
             except: pass
 
         task = Task(entry_id=entry.id, description=task_data.get("description", "Task"), group=group, priority=task_data.get("priority", default_priority), due_date=due_date, status="open")
-        db.add(task)
-        db.commit()
+        db.add(task); db.commit()
         created_tasks.append(task)
         if group not in existing_groups:
             existing_groups.append(group)
@@ -102,7 +90,7 @@ async def _match_tasks_with_llm(raw_input, open_tasks):
 
 
 async def _complete_tasks(user, raw_input, intent_data, db, input_type):
-    open_tasks = db.query(Task).join(Entry).filter(Entry.user_id == user.id, Task.status == "open").all()
+    open_tasks = db.query(Task).join(Entry).filter(Entry.user_id == user.id, Entry.deleted_at.is_(None), Task.status == "open").all()
     matched = []
 
     if open_tasks:
@@ -115,9 +103,7 @@ async def _complete_tasks(user, raw_input, intent_data, db, input_type):
         db.commit()
 
     entry = Entry(user_id=user.id, input_type=input_type, raw_transcript=raw_input, processed_content=f"Completed {len(matched)} task(s)", title="Tasks completed", module="task", module_data=json.dumps({"action": "complete", "completed": [t.description for t in matched]}))
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
+    db.add(entry); db.commit(); db.refresh(entry)
 
     if matched:
         response = f"Done! Marked as complete: {', '.join(t.description for t in matched)}."

@@ -21,6 +21,17 @@ from app import models
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+
+    # Migration: add deleted_at column if it doesn't exist
+    from sqlalchemy import text, inspect
+    with engine.connect() as conn:
+        inspector = inspect(engine)
+        columns = [c["name"] for c in inspector.get_columns("entries")]
+        if "deleted_at" not in columns:
+            conn.execute(text("ALTER TABLE entries ADD COLUMN deleted_at TIMESTAMP"))
+            conn.commit()
+            print("Migration: added deleted_at column to entries")
+
     print("Database tables created/verified")
     print(f"Google Calendar: {'connected' if is_google_connected() else 'not connected'}")
     print(f"Twilio SMS: {'configured' if is_twilio_configured() else 'not configured'}")

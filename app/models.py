@@ -1,6 +1,8 @@
 """
 models.py — Database Table Definitions
 ========================================
+Soft delete: Entry.deleted_at is set instead of actually removing rows.
+Trash auto-purges after 10 days.
 """
 
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
@@ -38,6 +40,7 @@ class Entry(Base):
     module = Column(String, nullable=False, default="memo", index=True)
     module_data = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    deleted_at = Column(DateTime, nullable=True, index=True)
 
     user = relationship("User", back_populates="entries")
     calendar_event = relationship("CalendarEvent", back_populates="entry", uselist=False)
@@ -81,10 +84,6 @@ class Task(Base):
 
 
 class RememberItem(Base):
-    """
-    Things to remember — facts, preferences, references, info to keep handy.
-    Categorized and searchable from the dashboard.
-    """
     __tablename__ = "remember_items"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -92,24 +91,21 @@ class RememberItem(Base):
 
     content = Column(Text, nullable=False)
     category = Column(String, nullable=False, default="General", index=True)
-    tags = Column(String, nullable=True)  # Comma-separated tags
+    tags = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     entry = relationship("Entry", back_populates="remember_item")
 
 
 class JournalEntry(Base):
-    """
-    Daily journal — activities grouped by day and by topic/project.
-    """
     __tablename__ = "journal_entries"
 
     id = Column(Integer, primary_key=True, index=True)
     entry_id = Column(Integer, ForeignKey("entries.id"), nullable=False)
 
     content = Column(Text, nullable=False)
-    activity_type = Column(String, nullable=True)  # "work", "social", "health", "errands", etc.
-    topic = Column(String, nullable=True, index=True)  # Project or recurring topic
+    activity_type = Column(String, nullable=True)
+    topic = Column(String, nullable=True, index=True)
     date = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

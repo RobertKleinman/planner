@@ -96,7 +96,7 @@ async def auto_complete_tasks(user: User, intents: list, db: Session) -> list:
     """
     open_tasks = (
         db.query(Task).join(Entry)
-        .filter(Entry.user_id == user.id, Task.status == "open")
+        .filter(Entry.user_id == user.id, Entry.deleted_at.is_(None), Task.status == "open")
         .all()
     )
     if not open_tasks:
