@@ -1,6 +1,7 @@
 """
 routers/input.py — Universal Input Endpoint
 =============================================
+Supports multi-intent: a single recording can trigger multiple modules.
 """
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
@@ -87,6 +88,11 @@ async def process_input(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> InputResponse:
+    """
+    Universal input endpoint. Supports multi-intent — a single recording
+    can create a calendar event, add tasks, and save things to remember,
+    all at once.
+    """
     transcript = None
     image_bytes = None
     image_description = None
@@ -123,8 +129,9 @@ async def process_input(
     if not transcript and not image_bytes:
         raise HTTPException(status_code=400, detail="Could not process the input.")
 
+    # --- Classify intent (now returns a LIST) ---
     try:
-        intent_data = await classify_intent(
+        intents = await classify_intent(
             transcript=transcript,
             image_bytes=image_bytes,
             image_media_type=image_media_type or "image/jpeg",
@@ -133,21 +140,39 @@ async def process_input(
         raise HTTPException(status_code=500, detail=f"Intent classification failed: {e}")
 
     if image_bytes and not transcript:
-        image_description = intent_data.get("data", {}).get("content", "Image analyzed")
+        image_description = intents[0].get("data", {}).get("content", "Image analyzed") if intents else "Image analyzed"
 
-    module_name = intent_data.get("module", "memo")
-    handler = MODULE_HANDLERS.get(module_name, handle_memo)
+    # --- Process each intent through its module ---
+    responses = []
+    first_entry_id = None
 
-    try:
-        response = await handler(
-            user=user,
-            raw_input=transcript or image_description or "",
-            intent_data=intent_data,
-            db=db,
-            input_type=input_type,
-            image_description=image_description,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Module processing failed: {e}")
+    for intent_data in intents:
+        module_name = intent_data.get("module", "memo")
+        handler = MODULE_HANDLERS.get(module_name, handle_memo)
 
-    return response
+        try:
+            response = await handler(
+                user=user,
+                raw_input=transcript or image_description or "",
+                intent_data=intent_data,
+                db=db,
+                input_type=input_type,
+                image_description=image_description,
+            )
+            responses.append(response.spoken_response)
+            if first_entry_id is None:
+                first_entry_id = response.entry_id
+        except Exception as e:
+            responses.append(f"Error processing {module_name}: {e}")
+
+    # --- Combine all responses ---
+    combined_response = " ".join(responses)
+
+    # Figure out the primary module (first one, or the most "important")
+    primary_module = intents[0].get("module", "memo") if intents else "memo"
+
+    return InputResponse(
+        spoken_response=combined_response,
+        entry_id=first_entry_id or 0,
+        module=primary_module,
+    )
