@@ -1,11 +1,11 @@
 """
 main.py — Application Entry Point
 ====================================
-Creates the FastAPI app, registers routers, sets up the database.
 """
 import os
+import secrets
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -14,7 +14,7 @@ from app.database import engine, Base, get_db
 from app.schemas import HealthResponse
 from app.services.google_auth import is_google_connected
 from app.services.sms import is_twilio_configured
-from app.auth import hash_api_key
+from app.auth import hash_api_key, get_current_user
 from app import models
 
 
@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Planner API",
     description="Voice-first personal planner. Speak, and things happen.",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -54,7 +54,7 @@ def health_check():
     return HealthResponse(
         status="healthy",
         environment=settings.environment,
-        version="0.2.0",
+        version="0.3.0",
         google_connected=is_google_connected(),
         twilio_configured=is_twilio_configured(),
     )
@@ -62,7 +62,7 @@ def health_check():
 
 @app.post("/setup-user", tags=["system"])
 async def setup_user(db: Session = Depends(get_db)):
-    """One-time user setup using PLANNER_API_KEY from environment."""
+    """One-time setup for the primary user using PLANNER_API_KEY from environment."""
     existing = db.query(models.User).first()
     if existing:
         return {"message": "User already exists", "email": existing.email}
@@ -73,10 +73,46 @@ async def setup_user(db: Session = Depends(get_db)):
 
     user = models.User(
         email="robertmkleinman@gmail.com",
-        name="Rob Kleinman",
+        name="Rob",
         api_key_hash=hash_api_key(api_key),
         is_active=True,
     )
     db.add(user)
     db.commit()
     return {"message": "User created", "email": "robertmkleinman@gmail.com"}
+
+
+@app.post("/admin/create-user", tags=["system"])
+async def create_user(
+    name: str = Body(...),
+    email: str = Body(...),
+    phone: str = Body(None, description="Phone number for SMS notifications"),
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(get_current_user),
+):
+    """
+    Create a new user. Requires API key of an existing user.
+    Returns the new user's API key — shown ONCE, save it!
+    """
+    existing = db.query(models.User).filter(models.User.email == email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+
+    new_api_key = secrets.token_urlsafe(32)
+
+    user = models.User(
+        email=email,
+        name=name,
+        api_key_hash=hash_api_key(new_api_key),
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+
+    return {
+        "message": f"User '{name}' created successfully",
+        "name": name,
+        "email": email,
+        "api_key": new_api_key,
+        "important": "Save this API key now — it cannot be retrieved later!",
+    }

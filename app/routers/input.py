@@ -2,7 +2,7 @@
 routers/input.py — Universal Input Endpoint
 =============================================
 Supports multi-intent: a single recording can trigger multiple modules.
-Includes detailed logging for debugging.
+Post-processing: auto-completes tasks when actions imply they're done.
 """
 
 import json
@@ -10,14 +10,17 @@ import traceback
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional
+from datetime import datetime, timezone
 import subprocess
 import tempfile
 import os
 
+from anthropic import Anthropic
 from app.database import get_db
 from app.auth import get_current_user
-from app.models import User
+from app.models import User, Entry, Task
 from app.schemas import InputResponse
+from app.config import settings
 from app.services.transcription import transcribe_audio
 from app.services.intent import classify_intent
 from app.modules.memo import handle_memo
@@ -27,6 +30,8 @@ from app.modules.remember import handle_remember
 from app.modules.journal import handle_journal
 
 router = APIRouter(prefix="/api/v1", tags=["input"])
+
+client = Anthropic(api_key=settings.anthropic_api_key)
 
 MODULE_HANDLERS = {
     "memo": handle_memo,
@@ -84,10 +89,108 @@ def get_image_media_type(filename: str) -> str:
     return {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/jpeg")
 
 
+async def auto_complete_tasks(user: User, intents: list, db: Session) -> list:
+    """
+    Post-processing: checks if processed intents imply an open task is done.
+    e.g. "ate an apple" (food) completes open task "eat an apple"
+    """
+    open_tasks = (
+        db.query(Task).join(Entry)
+        .filter(Entry.user_id == user.id, Task.status == "open")
+        .all()
+    )
+    if not open_tasks:
+        return []
+
+    actions_done = []
+    for intent in intents:
+        module = intent.get("module", "")
+        data = intent.get("data", {})
+
+        if module == "task":
+            continue
+
+        if module == "journal":
+            for act in data.get("activities", []):
+                actions_done.append(act.get("content", ""))
+        elif module == "food":
+            items = data.get("items", [])
+            if items:
+                actions_done.append(f"Ate {', '.join(items) if isinstance(items, list) else items}")
+        elif module == "calendar":
+            actions_done.append(f"Scheduled {data.get('title', '')}")
+        elif module == "gym":
+            exercises = data.get("exercises", [])
+            if exercises:
+                actions_done.append(f"Did gym: {', '.join(e.get('name','') for e in exercises)}")
+            else:
+                actions_done.append("Went to the gym")
+        elif module == "expense":
+            actions_done.append(f"Spent money at {data.get('vendor', 'somewhere')}")
+        elif module in ("mood", "remember", "diary"):
+            pass
+        else:
+            content = data.get("content", "")
+            if content:
+                actions_done.append(content)
+
+    if not actions_done:
+        return []
+
+    task_list = "\n".join(f"  ID {t.id}: {t.description} [{t.group}]" for t in open_tasks)
+    actions_list = "\n".join(f"  - {a}" for a in actions_done if a)
+
+    print(f"[PLANNER] Auto-complete: {len(actions_done)} actions vs {len(open_tasks)} open tasks")
+
+    try:
+        response = client.messages.create(
+            model=settings.intent_model,
+            max_tokens=512,
+            system="You match completed activities to open tasks. Respond with ONLY valid JSON — no markdown, no backticks.",
+            messages=[{
+                "role": "user",
+                "content": f"""The user just reported doing these things:
+{actions_list}
+
+Their open tasks are:
+{task_list}
+
+Which open tasks were implicitly completed by the activities above? Return:
+{{"matched_ids": [list of task IDs], "explanation": "brief reason"}}
+
+Rules:
+- "ate an apple" completes "eat an apple"
+- "went to the gym" completes "go to the gym"
+- "walked the dogs" completes "walk Biscuit and Bentley"
+- Be generous if the activity clearly fulfills the task.
+- Don't match unrelated things.
+- If nothing matches, return empty list.
+- Only return IDs from the list above."""
+            }],
+        )
+        result = json.loads(response.content[0].text.strip())
+        matched_ids = result.get("matched_ids", [])
+    except Exception as e:
+        print(f"[PLANNER] Auto-complete error: {e}")
+        return []
+
+    completed = []
+    for task in open_tasks:
+        if task.id in matched_ids:
+            task.status = "done"
+            task.completed_at = datetime.now(timezone.utc)
+            completed.append(task)
+            print(f"[PLANNER] Auto-completed: {task.description}")
+
+    if completed:
+        db.commit()
+    return completed
+
+
 @router.post("/input", response_model=InputResponse)
 async def process_input(
-    file: Optional[UploadFile] = File(None, description="Audio, image, or video file"),
-    text: Optional[str] = Form(None, description="Direct text input"),
+    file: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> InputResponse:
@@ -129,10 +232,9 @@ async def process_input(
         raise HTTPException(status_code=400, detail="Could not process the input.")
 
     print(f"[PLANNER] === New input ===")
-    print(f"[PLANNER] Type: {input_type}")
+    print(f"[PLANNER] User: {user.name} | Type: {input_type}")
     print(f"[PLANNER] Transcript: {transcript}")
 
-    # --- Classify intent (returns a LIST) ---
     try:
         intents = await classify_intent(
             transcript=transcript,
@@ -140,51 +242,54 @@ async def process_input(
             image_media_type=image_media_type or "image/jpeg",
         )
     except Exception as e:
-        print(f"[PLANNER] ERROR in classify_intent: {e}")
+        print(f"[PLANNER] ERROR classify_intent: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Intent classification failed: {e}")
 
-    print(f"[PLANNER] Classifier returned type: {type(intents).__name__}")
-    print(f"[PLANNER] Classifier returned: {json.dumps(intents, indent=2, default=str)}")
-    print(f"[PLANNER] Number of intents: {len(intents)}")
+    print(f"[PLANNER] Intents: {len(intents)}")
+    for i, intent in enumerate(intents):
+        print(f"[PLANNER]   {i+1}. {intent.get('module')} — {intent.get('title')}")
 
     if image_bytes and not transcript:
         image_description = intents[0].get("data", {}).get("content", "Image analyzed") if intents else "Image analyzed"
 
-    # --- Process each intent through its module ---
     responses = []
     first_entry_id = None
 
     for i, intent_data in enumerate(intents):
         module_name = intent_data.get("module", "memo")
         handler = MODULE_HANDLERS.get(module_name, handle_memo)
-
-        print(f"[PLANNER] Processing intent {i+1}/{len(intents)}: module={module_name}")
-        print(f"[PLANNER]   Intent data: {json.dumps(intent_data, default=str)}")
+        print(f"[PLANNER] Processing {i+1}/{len(intents)}: {module_name}")
 
         try:
             response = await handler(
-                user=user,
-                raw_input=transcript or image_description or "",
-                intent_data=intent_data,
-                db=db,
-                input_type=input_type,
-                image_description=image_description,
+                user=user, raw_input=transcript or image_description or "",
+                intent_data=intent_data, db=db,
+                input_type=input_type, image_description=image_description,
             )
             responses.append(response.spoken_response)
             if first_entry_id is None:
                 first_entry_id = response.entry_id
-            print(f"[PLANNER]   SUCCESS: {response.spoken_response[:80]}")
+            print(f"[PLANNER]   OK: {response.spoken_response[:80]}")
         except Exception as e:
-            print(f"[PLANNER]   ERROR in {module_name} handler: {e}")
+            print(f"[PLANNER]   ERROR {module_name}: {e}")
             traceback.print_exc()
             responses.append(f"Error processing {module_name}: {e}")
 
-    # --- Combine all responses ---
+    # Post-processing: auto-complete tasks
+    try:
+        auto_completed = await auto_complete_tasks(user, intents, db)
+        if auto_completed:
+            names = ", ".join(t.description for t in auto_completed)
+            responses.append(f"Also marked as done: {names}.")
+            print(f"[PLANNER] Auto-completed: {names}")
+    except Exception as e:
+        print(f"[PLANNER] Auto-complete error: {e}")
+        traceback.print_exc()
+
     combined_response = " ".join(responses)
     primary_module = intents[0].get("module", "memo") if intents else "memo"
-
-    print(f"[PLANNER] === Done. {len(responses)} modules processed. Primary: {primary_module} ===")
+    print(f"[PLANNER] === Done. {len(responses)} responses. Primary: {primary_module} ===")
 
     return InputResponse(
         spoken_response=combined_response,
