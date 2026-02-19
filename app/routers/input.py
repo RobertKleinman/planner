@@ -2,8 +2,11 @@
 routers/input.py — Universal Input Endpoint
 =============================================
 Supports multi-intent: a single recording can trigger multiple modules.
+Includes detailed logging for debugging.
 """
 
+import json
+import traceback
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -88,11 +91,7 @@ async def process_input(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> InputResponse:
-    """
-    Universal input endpoint. Supports multi-intent — a single recording
-    can create a calendar event, add tasks, and save things to remember,
-    all at once.
-    """
+
     transcript = None
     image_bytes = None
     image_description = None
@@ -129,7 +128,11 @@ async def process_input(
     if not transcript and not image_bytes:
         raise HTTPException(status_code=400, detail="Could not process the input.")
 
-    # --- Classify intent (now returns a LIST) ---
+    print(f"[PLANNER] === New input ===")
+    print(f"[PLANNER] Type: {input_type}")
+    print(f"[PLANNER] Transcript: {transcript}")
+
+    # --- Classify intent (returns a LIST) ---
     try:
         intents = await classify_intent(
             transcript=transcript,
@@ -137,7 +140,13 @@ async def process_input(
             image_media_type=image_media_type or "image/jpeg",
         )
     except Exception as e:
+        print(f"[PLANNER] ERROR in classify_intent: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Intent classification failed: {e}")
+
+    print(f"[PLANNER] Classifier returned type: {type(intents).__name__}")
+    print(f"[PLANNER] Classifier returned: {json.dumps(intents, indent=2, default=str)}")
+    print(f"[PLANNER] Number of intents: {len(intents)}")
 
     if image_bytes and not transcript:
         image_description = intents[0].get("data", {}).get("content", "Image analyzed") if intents else "Image analyzed"
@@ -146,9 +155,12 @@ async def process_input(
     responses = []
     first_entry_id = None
 
-    for intent_data in intents:
+    for i, intent_data in enumerate(intents):
         module_name = intent_data.get("module", "memo")
         handler = MODULE_HANDLERS.get(module_name, handle_memo)
+
+        print(f"[PLANNER] Processing intent {i+1}/{len(intents)}: module={module_name}")
+        print(f"[PLANNER]   Intent data: {json.dumps(intent_data, default=str)}")
 
         try:
             response = await handler(
@@ -162,14 +174,17 @@ async def process_input(
             responses.append(response.spoken_response)
             if first_entry_id is None:
                 first_entry_id = response.entry_id
+            print(f"[PLANNER]   SUCCESS: {response.spoken_response[:80]}")
         except Exception as e:
+            print(f"[PLANNER]   ERROR in {module_name} handler: {e}")
+            traceback.print_exc()
             responses.append(f"Error processing {module_name}: {e}")
 
     # --- Combine all responses ---
     combined_response = " ".join(responses)
-
-    # Figure out the primary module (first one, or the most "important")
     primary_module = intents[0].get("module", "memo") if intents else "memo"
+
+    print(f"[PLANNER] === Done. {len(responses)} modules processed. Primary: {primary_module} ===")
 
     return InputResponse(
         spoken_response=combined_response,
