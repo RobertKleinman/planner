@@ -284,6 +284,8 @@ def _trash_label(entry):
 
 def _days_left(deleted_at):
     if not deleted_at: return 10
+    if deleted_at.tzinfo is None:
+        deleted_at = deleted_at.replace(tzinfo=timezone.utc)
     elapsed = (datetime.now(timezone.utc) - deleted_at).days
     return max(0, 10 - elapsed)
 
@@ -311,8 +313,8 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
             for t in tg[group]:
                 due = f'<span class="due">Due {_fdate(t.due_date)}</span>' if t.due_date else ""
                 tasks_html += f'''<div class="item row" id="entry-{t.entry_id}">
-                    <div class="left" onclick="completeTask({t.id})"><div class="circle-wrap"><span class="circle"></span></div><span class="item-text">{_e(t.description)}</span></div>
-                    <div class="right">{_badge(t.priority)} {due} <span class="ts">{_fmt(t.created_at)}</span><button class="del-btn" onclick="trashItem({t.entry_id})" title="Move to trash">&#128465;</button></div>
+                    <div class="left"><span class="item-text">{_e(t.description)}</span></div>
+                    <div class="right">{_badge(t.priority)} {due} <span class="ts">{_fmt(t.created_at)}</span><button class="done-btn" onclick="completeTask({t.id})" title="Mark done">&#10003;</button><button class="del-btn" onclick="trashItem({t.entry_id})" title="Move to trash">&#128465;</button></div>
                 </div>'''
     else:
         tasks_html = '<div class="empty-state"><div class="empty-icon">&#10003;</div><div>You\'re all caught up!</div></div>'
@@ -321,8 +323,8 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
     if done_tasks:
         for t in done_tasks:
             done_html += f'''<div class="item row done" id="entry-{t.entry_id}">
-                <div class="left" onclick="reopenTask({t.id})"><span class="check-mark">&#10003;</span><span class="item-text">{_e(t.description)}</span></div>
-                <div class="right"><span class="tag">{_e(t.group)}</span><span class="ts">{_fmt(t.completed_at)}</span><button class="del-btn" onclick="trashItem({t.entry_id})" title="Move to trash">&#128465;</button></div>
+                <div class="left"><span class="item-text">{_e(t.description)}</span></div>
+                <div class="right"><span class="tag">{_e(t.group)}</span><span class="ts">{_fmt(t.completed_at)}</span><button class="reopen-btn" onclick="reopenTask({t.id})" title="Reopen">&#8634;</button><button class="del-btn" onclick="trashItem({t.entry_id})" title="Move to trash">&#128465;</button></div>
             </div>'''
     else:
         done_html = '<div class="empty">Complete a task to see it here.</div>'
@@ -493,16 +495,10 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
 .item{{padding:10px 12px;border-radius:8px;margin-bottom:3px;transition:all .25s ease}}
 .item:hover{{background:rgba(255,255,255,.03)}}
 .row{{display:flex;justify-content:space-between;align-items:center;gap:8px}}
-.left{{display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;min-width:0}}
+.left{{display:flex;align-items:center;gap:10px;flex:1;min-width:0}}
 .right{{display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap}}
 .item-text{{font-size:13px;color:var(--text)}}
 .item.done{{opacity:.45}}.item.done .item-text{{text-decoration:line-through}}
-
-/* Circles & checks */
-.circle-wrap{{flex-shrink:0}}
-.circle{{display:block;width:18px;height:18px;border:2px solid var(--border-light);border-radius:50%;transition:all .2s}}
-.circle:hover{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,.15)}}
-.check-mark{{width:18px;height:18px;background:var(--success);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;flex-shrink:0;cursor:pointer}}
 
 /* Badges */
 .badge{{color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;letter-spacing:.3px;white-space:nowrap}}
@@ -562,10 +558,13 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
 .perm-del-btn{{background:none;border:1px solid var(--border-light);color:var(--text-muted);cursor:pointer;font-size:12px;padding:3px 8px;border-radius:6px;transition:all .15s}}
 .perm-del-btn:hover{{color:var(--danger);border-color:var(--danger);background:rgba(220,38,38,.1)}}
 
-/* Delete button (universal) */
-.del-btn{{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:4px;transition:all .15s;opacity:0}}
-.item:hover .del-btn,.ev-card:hover .del-btn{{opacity:1}}
+/* Action buttons */
+.del-btn{{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px;padding:4px 6px;border-radius:4px;transition:all .15s}}
 .del-btn:hover{{color:var(--danger)}}
+.done-btn{{background:none;border:1px solid var(--border-light);color:var(--success);cursor:pointer;font-size:12px;padding:3px 8px;border-radius:6px;transition:all .15s}}
+.done-btn:hover{{background:rgba(22,163,106,.15);border-color:var(--success)}}
+.reopen-btn{{background:none;border:1px solid var(--border-light);color:var(--text-dim);cursor:pointer;font-size:14px;padding:3px 8px;border-radius:6px;transition:all .15s}}
+.reopen-btn:hover{{color:var(--accent);border-color:var(--accent);background:rgba(99,102,241,.1)}}
 
 /* Forms */
 .add-form{{display:none;padding:14px;background:var(--surface);border:1px solid var(--border-light);border-radius:8px;margin-bottom:14px}}
@@ -596,7 +595,6 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
     .row{{flex-direction:column;align-items:flex-start;gap:4px}}
     .right{{margin-left:28px}}
     .form-row{{flex-direction:column}}
-    .del-btn{{opacity:1}}
 }}
 </style>
 </head>
