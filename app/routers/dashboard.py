@@ -18,6 +18,7 @@ import json
 from app.database import get_db
 from app.auth import hash_api_key
 from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry
+from app.services.google_auth import get_calendar_service
 
 router = APIRouter(tags=["dashboard"])
 
@@ -91,6 +92,18 @@ async def trash_item(entry_id: int, request: Request, db: Session = Depends(get_
     entry = db.query(Entry).filter(Entry.id == entry_id, Entry.user_id == user.id).first()
     if not entry:
         return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    # If it's a calendar event, try to delete from Google Calendar too
+    if entry.calendar_event and entry.calendar_event.google_event_id:
+        try:
+            service = get_calendar_service()
+            if service:
+                service.events().delete(calendarId='primary', eventId=entry.calendar_event.google_event_id).execute()
+                print(f"[PLANNER] Deleted Google Calendar event: {entry.calendar_event.google_event_id}")
+        except Exception as e:
+            # Event may already be deleted from Google — that's fine
+            print(f"[PLANNER] Could not delete from Google Calendar (may already be gone): {e}")
+
     entry.deleted_at = datetime.now(timezone.utc)
     db.commit()
     return JSONResponse(content={"ok": True})
@@ -390,17 +403,27 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
 
     journal_html = ""
     if jbd:
+        work_types = {"work", "learning"}
         for day in jbd:
             journal_html += f'<div class="day-hdr">{day}</div>'
-            by_type = defaultdict(list)
-            for j in jbd[day]: by_type[j.activity_type or "general"].append(j)
-            for atype in sorted(by_type.keys()):
-                label = atype.replace("_"," ").title()
-                journal_html += f'<div class="atype-label">{label}</div>'
-                for j in by_type[atype]:
+            work_items = [j for j in jbd[day] if (j.activity_type or "").lower() in work_types]
+            life_items = [j for j in jbd[day] if (j.activity_type or "").lower() not in work_types]
+            if work_items:
+                journal_html += '<div class="section-label"><span class="section-icon">&#128188;</span> Work</div>'
+                for j in work_items:
                     topic = f'<span class="topic-tag">{_e(j.topic)}</span>' if j.topic else ""
+                    atype = f'<span class="tag">{(j.activity_type or "").replace("_"," ").title()}</span>' if j.activity_type else ""
                     journal_html += f'''<div class="item" id="entry-{j.entry_id}">
-                        <div class="journal-row"><div>{_e(j.content)} {topic}</div><button class="del-btn" onclick="trashItem({j.entry_id})" title="Move to trash">&#128465;</button></div>
+                        <div class="journal-row"><div>{_e(j.content)} {topic} {atype}</div><button class="del-btn" onclick="trashItem({j.entry_id})" title="Move to trash">&#128465;</button></div>
+                        <div class="ts">{_fmt(j.created_at)}</div>
+                    </div>'''
+            if life_items:
+                journal_html += '<div class="section-label"><span class="section-icon">&#127793;</span> Life</div>'
+                for j in life_items:
+                    topic = f'<span class="topic-tag">{_e(j.topic)}</span>' if j.topic else ""
+                    atype = f'<span class="tag">{(j.activity_type or "").replace("_"," ").title()}</span>' if j.activity_type else ""
+                    journal_html += f'''<div class="item" id="entry-{j.entry_id}">
+                        <div class="journal-row"><div>{_e(j.content)} {topic} {atype}</div><button class="del-btn" onclick="trashItem({j.entry_id})" title="Move to trash">&#128465;</button></div>
                         <div class="ts">{_fmt(j.created_at)}</div>
                     </div>'''
     else:
@@ -513,6 +536,8 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
 .group-count{{font-size:9px;background:var(--surface);color:var(--text-muted);padding:1px 6px;border-radius:10px;font-weight:500}}
 .day-hdr{{font-size:13px;font-weight:600;color:var(--accent);margin:16px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--border)}}
 .day-hdr:first-child{{margin-top:0}}
+.section-label{{font-size:11px;font-weight:700;color:var(--text-dim);margin:10px 0 4px 0;padding:4px 10px;background:var(--surface);border-radius:6px;display:inline-flex;align-items:center;gap:4px}}
+.section-icon{{font-size:13px}}
 .atype-label{{font-size:10px;color:var(--text-muted);font-weight:600;margin:6px 0 3px 4px;text-transform:uppercase;letter-spacing:.5px}}
 
 /* Calendar */
@@ -691,11 +716,18 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
 </div>
 
 <script>
-function showTab(n,el){{document.querySelectorAll('.tc').forEach(e=>e.classList.remove('active'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById(n).classList.add('active');el.classList.add('active')}}
+function showTab(n,el){{document.querySelectorAll('.tc').forEach(e=>e.classList.remove('active'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById(n).classList.add('active');el.classList.add('active');window.location.hash=n}}
 function toggleForm(id){{document.getElementById(id).classList.toggle('show')}}
 function handleCustom(sel,cid){{const c=document.getElementById(cid);if(sel.value==='__custom'){{c.style.display='block';c.focus()}}else{{c.style.display='none';c.value=''}}}}
 async function api(m,u,b){{const o={{method:m,headers:{{'Content-Type':'application/json'}}}};if(b)o.body=JSON.stringify(b);return(await fetch(u,o)).json()}}
 function fadeOut(id){{const el=document.getElementById(id);if(el){{el.classList.add('fade-out');setTimeout(()=>el.remove(),300)}}}}
+function reloadTab(){{const h=window.location.hash.replace('#','');window.location.reload()}}
+
+// Restore tab from URL hash on page load
+document.addEventListener('DOMContentLoaded',function(){{
+    const h=window.location.hash.replace('#','');
+    if(h){{const tab=document.querySelector('.tab[onclick*=\"'+h+'\"]');if(tab)showTab(h,tab)}}
+}})
 
 async function addTask(){{
     const d=document.getElementById('task-desc').value.trim();if(!d)return;
