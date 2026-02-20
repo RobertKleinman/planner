@@ -17,7 +17,7 @@ import json
 
 from app.database import get_db
 from app.auth import hash_api_key
-from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry
+from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, NotificationContact
 from app.services.google_auth import get_calendar_service
 
 router = APIRouter(tags=["dashboard"])
@@ -215,6 +215,50 @@ async def add_remember(request: Request, db: Session = Depends(get_db)):
     return JSONResponse(content={"ok": True, "id": item.id})
 
 
+# ─── CRUD: Notification Contacts ──────────────────────────
+
+@router.post("/dashboard/api/contacts")
+async def add_contact(request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+    body = await request.json()
+    name = body.get("name", "").strip()
+    phone = body.get("phone", "").strip()
+    mode = body.get("notify_mode", "always")
+    if not name or not phone:
+        return JSONResponse(status_code=400, content={"error": "Name and phone required"})
+    contact = NotificationContact(user_id=user.id, name=name, phone=phone, notify_mode=mode)
+    db.add(contact); db.commit()
+    return JSONResponse(content={"ok": True, "id": contact.id})
+
+
+@router.post("/dashboard/api/contacts/{contact_id}/mode")
+async def update_contact_mode(contact_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+    body = await request.json()
+    contact = db.query(NotificationContact).filter(NotificationContact.id == contact_id, NotificationContact.user_id == user.id).first()
+    if not contact:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    contact.notify_mode = body.get("notify_mode", contact.notify_mode)
+    db.commit()
+    return JSONResponse(content={"ok": True})
+
+
+@router.delete("/dashboard/api/contacts/{contact_id}")
+async def delete_contact(contact_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+    contact = db.query(NotificationContact).filter(NotificationContact.id == contact_id, NotificationContact.user_id == user.id).first()
+    if not contact:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    db.delete(contact); db.commit()
+    return JSONResponse(content={"ok": True})
+
+
 # ─── Main Dashboard ───────────────────────────────────────
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -239,6 +283,9 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     # Trash
     trashed = db.query(Entry).filter(Entry.user_id == user.id, Entry.deleted_at.isnot(None)).order_by(Entry.deleted_at.desc()).all()
 
+    # Notification contacts
+    contacts = db.query(NotificationContact).filter(NotificationContact.user_id == user.id).order_by(NotificationContact.name).all()
+
     # Stats
     total_open = len(open_tasks)
     total_done_today = len([t for t in done_tasks if t.completed_at and t.completed_at.date() == datetime.now(timezone.utc).date()])
@@ -249,7 +296,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     task_groups = sorted(set(t.group for t in all_tasks)) if all_tasks else ["General", "Errands", "House", "Work", "Health", "Personal", "Dogs"]
     remember_cats = sorted(set(r.category for r in remember_items)) if remember_items else ["General", "People", "Passwords", "Home", "Work", "Reference"]
 
-    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, task_groups, remember_cats, total_open, total_done_today, total_journal_today)
+    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today)
     return HTMLResponse(content=html)
 
 
@@ -305,7 +352,7 @@ def _days_left(deleted_at):
 
 # ─── Render ──────────────────────────────────────────────
 
-def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, task_groups, remember_cats, total_open, total_done_today, total_journal_today):
+def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today):
 
     # ── Stats bar ──
     stats_html = f'''<div class="stats-bar">
@@ -471,6 +518,29 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
     else:
         trash_html = '<div class="empty-state"><div class="empty-icon">&#128465;</div><div>Trash is empty</div></div>'
 
+    # ── Settings / Contacts ──
+    contacts_html = ""
+    mode_labels = {"always": "Always notify", "mentioned": "When mentioned", "never": "Never"}
+    mode_colors = {"always": "#16a34a", "mentioned": "#ca8a04", "never": "#6b7a8d"}
+    if contacts:
+        for c in contacts:
+            mode_options = ""
+            for m in ["always", "mentioned", "never"]:
+                sel = "selected" if c.notify_mode == m else ""
+                mode_options += f'<option value="{m}" {sel}>{mode_labels[m]}</option>'
+            contacts_html += f'''<div class="item contact-row" id="contact-{c.id}">
+                <div class="contact-info">
+                    <div class="contact-name">{_e(c.name)}</div>
+                    <div class="contact-phone">{_e(c.phone)}</div>
+                </div>
+                <div class="contact-actions">
+                    <select class="mode-select" onchange="updateContactMode({c.id}, this.value)">{mode_options}</select>
+                    <button class="del-btn" onclick="deleteContact({c.id})" title="Remove contact">&#128465;</button>
+                </div>
+            </div>'''
+    else:
+        contacts_html = '<div class="empty">No contacts yet. Add someone to receive calendar SMS notifications.</div>'
+
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -572,6 +642,15 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
 .memo-title{{font-size:13px;font-weight:600;color:#e2e8f0}}
 .memo-body{{font-size:12px;color:var(--text-dim);margin-top:3px;line-height:1.5}}
 
+/* Contacts */
+.contact-row{{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px}}
+.contact-info{{flex:1}}
+.contact-name{{font-size:14px;font-weight:600;color:#e2e8f0}}
+.contact-phone{{font-size:12px;color:var(--text-dim);margin-top:1px}}
+.contact-actions{{display:flex;align-items:center;gap:8px}}
+.mode-select{{padding:5px 8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;font-family:inherit;cursor:pointer;outline:none}}
+.mode-select:focus{{border-color:var(--accent)}}
+
 /* Trash */
 .trash-item{{border-left:3px solid var(--danger);padding-left:14px}}
 .trash-row{{display:flex;justify-content:space-between;align-items:center;gap:8px}}
@@ -643,6 +722,7 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
         <button class="tab" onclick="showTab('journal',this)">Journal</button>
         <button class="tab" onclick="showTab('memos',this)">Memos</button>
         <button class="tab" onclick="showTab('trash',this)">Trash{f' <span class="tab-badge">{trash_count}</span>' if trash_count else ''}</button>
+        <button class="tab" onclick="showTab('settings',this)">Settings</button>
     </div>
 
     <div id="tasks" class="tc active">
@@ -713,6 +793,30 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
             {trash_html}
         </div>
     </div>
+
+    <div id="settings" class="tc">
+        <div class="card">
+            <div class="card-title"><span>SMS Notification Contacts</span><button class="add-btn" onclick="toggleForm('contact-form')">+ Add contact</button></div>
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">
+                When you create a calendar event, these contacts can be notified via SMS.<br>
+                <strong>Always</strong> = text on every event &nbsp;|&nbsp; <strong>When mentioned</strong> = text only when you say their name &nbsp;|&nbsp; <strong>Never</strong> = paused
+            </div>
+            <div class="add-form" id="contact-form">
+                <input type="text" id="contact-name" placeholder="Name (e.g. Johnny)" onkeydown="if(event.key==='Enter')document.getElementById('contact-phone').focus()">
+                <input type="text" id="contact-phone" placeholder="Phone number (e.g. +14165551234)" onkeydown="if(event.key==='Enter')addContact()">
+                <select id="contact-mode">
+                    <option value="always">Always notify</option>
+                    <option value="mentioned">When mentioned</option>
+                    <option value="never">Never</option>
+                </select>
+                <div class="form-actions">
+                    <button class="btn btn-ghost" onclick="toggleForm('contact-form')">Cancel</button>
+                    <button class="btn btn-primary" onclick="addContact()">Add Contact</button>
+                </div>
+            </div>
+            {contacts_html}
+        </div>
+    </div>
 </div>
 
 <script>
@@ -751,6 +855,16 @@ async function trashItem(entryId){{await api('POST','/dashboard/api/trash/'+entr
 async function restoreItem(entryId){{await api('POST','/dashboard/api/restore/'+entryId);fadeOut('entry-'+entryId);setTimeout(()=>location.reload(),400)}}
 async function permDelete(entryId){{if(!confirm('Permanently delete this item? This cannot be undone.'))return;await api('DELETE','/dashboard/api/permanent/'+entryId);fadeOut('entry-'+entryId)}}
 async function emptyTrash(){{if(!confirm('Permanently delete ALL trashed items? This cannot be undone.'))return;await api('POST','/dashboard/api/empty-trash');location.reload()}}
+async function addContact(){{
+    const name=document.getElementById('contact-name').value.trim();
+    const phone=document.getElementById('contact-phone').value.trim();
+    const mode=document.getElementById('contact-mode').value;
+    if(!name||!phone)return;
+    await api('POST','/dashboard/api/contacts',{{name:name,phone:phone,notify_mode:mode}});
+    location.reload();
+}}
+async function updateContactMode(id,mode){{await api('POST','/dashboard/api/contacts/'+id+'/mode',{{notify_mode:mode}})}}
+async function deleteContact(id){{if(!confirm('Remove this contact?'))return;await api('DELETE','/dashboard/api/contacts/'+id);fadeOut('contact-'+id)}}
 </script>
 </body>
 </html>'''

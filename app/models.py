@@ -110,3 +110,17 @@ class JournalEntry(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     entry = relationship("Entry", back_populates="journal_entry")
+
+
+class NotificationContact(Base):
+    __tablename__ = "notification_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    name = Column(String, nullable=False)
+    phone = Column(String, nullable=False)
+    notify_mode = Column(String, nullable=False, default="always")  # always, mentioned, never
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
