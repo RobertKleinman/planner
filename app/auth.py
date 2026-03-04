@@ -1,5 +1,5 @@
 """
-auth.py — API Key Authentication
+auth.py â API Key Authentication
 ==================================
 Uses SHA-256 hashing for API keys instead of bcrypt.
 (bcrypt has compatibility issues with passlib on Windows.)
@@ -41,9 +41,10 @@ async def get_current_user(
     if not api_key:
         raise HTTPException(status_code=401, detail="Missing X-API-Key header.")
 
-    users = db.query(User).filter(User.is_active == True).all()
-    for user in users:
-        if verify_api_key(api_key, user.api_key_hash):
-            return user
+    # O(1) lookup: hash the key and query directly instead of loading all users
+    key_hash = hash_api_key(api_key)
+    user = db.query(User).filter(User.api_key_hash == key_hash, User.is_active == True).first()
+    if user:
+        return user
 
     raise HTTPException(status_code=401, detail="Invalid API key.")
