@@ -19,6 +19,7 @@ async def handle_remember(user, raw_input, intent_data, db, input_type="audio", 
 
     created = []
     first_entry_id = None
+    pending = []
 
     for item in items_data:
         category = item.get("category", "General")
@@ -38,18 +39,23 @@ async def handle_remember(user, raw_input, intent_data, db, input_type="audio", 
             title=item.get("content", "Remember")[:80],
             module="remember", module_data=json.dumps(item),
         )
-        db.add(entry); db.commit(); db.refresh(entry)
-        if first_entry_id is None:
-            first_entry_id = entry.id
-
-        remember = RememberItem(
-            entry_id=entry.id, content=item.get("content", ""),
-            category=category, tags=tags_str if tags_str else None,
-        )
-        db.add(remember); db.commit()
-        created.append(remember)
+        db.add(entry)
+        pending.append({"entry": entry, "content": item.get("content", ""), "category": category, "tags_str": tags_str})
         if category not in existing_cats:
             existing_cats.append(category)
+
+    # Flush to get entry IDs, then create all remember items
+    db.flush()
+    for info in pending:
+        if first_entry_id is None:
+            first_entry_id = info["entry"].id
+        remember = RememberItem(
+            entry_id=info["entry"].id, content=info["content"],
+            category=info["category"], tags=info["tags_str"] if info["tags_str"] else None,
+        )
+        db.add(remember)
+        created.append(remember)
+    db.commit()
 
     if len(created) == 1:
         response = f"Noted under {created[0].category}: {created[0].content[:60]}"

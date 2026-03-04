@@ -3,6 +3,7 @@ modules/task.py — Task Module
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from anthropic import Anthropic
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from app.models import User, Entry, Task
 from app.schemas import InputResponse
 from app.config import settings
 
+logger = logging.getLogger("planner.task")
 client = Anthropic(api_key=settings.anthropic_api_key)
 
 
@@ -34,6 +36,7 @@ async def _create_tasks(user, raw_input, intent_data, db, input_type, image_desc
 
     created_tasks = []
     first_entry_id = None
+    pending = []
 
     for task_data in tasks_data:
         group = task_data.get("group", default_group)
@@ -50,20 +53,28 @@ async def _create_tasks(user, raw_input, intent_data, db, input_type, image_desc
             title=task_data.get("description", "Task"),
             module="task", module_data=json.dumps(task_data),
         )
-        db.add(entry); db.commit(); db.refresh(entry)
-        if first_entry_id is None:
-            first_entry_id = entry.id
+        db.add(entry)
 
         due_date = None
         if task_data.get("due"):
-            try: due_date = datetime.fromisoformat(task_data["due"])
-            except: pass
+            try:
+                due_date = datetime.fromisoformat(task_data["due"])
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid due date format: {task_data['due']}")
 
-        task = Task(entry_id=entry.id, description=task_data.get("description", "Task"), group=group, priority=task_data.get("priority", default_priority), due_date=due_date, status="open")
-        db.add(task); db.commit()
-        created_tasks.append(task)
+        pending.append({"entry": entry, "description": task_data.get("description", "Task"), "group": group, "priority": task_data.get("priority", default_priority), "due_date": due_date})
         if group not in existing_groups:
             existing_groups.append(group)
+
+    # Flush to get entry IDs, then create all tasks
+    db.flush()
+    for info in pending:
+        if first_entry_id is None:
+            first_entry_id = info["entry"].id
+        task = Task(entry_id=info["entry"].id, description=info["description"], group=info["group"], priority=info["priority"], due_date=info["due_date"], status="open")
+        db.add(task)
+        created_tasks.append(task)
+    db.commit()
 
     if len(created_tasks) == 1:
         t = created_tasks[0]
@@ -85,7 +96,8 @@ async def _match_tasks_with_llm(raw_input, open_tasks):
     try:
         result = json.loads(response.content[0].text.strip())
         return result.get("matched_ids", [])
-    except:
+    except (json.JSONDecodeError, IndexError, AttributeError) as e:
+        logger.warning(f"Failed to parse task matching response: {e}")
         return []
 
 

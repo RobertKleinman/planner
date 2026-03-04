@@ -25,12 +25,15 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
+import logging
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Entry, User
+from app.models import Entry, User, Task, CalendarEvent
 from app.services.email_service import send_daily_digest
 from anthropic import Anthropic
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+logger = logging.getLogger("planner.digest")
 
 client = Anthropic(api_key=settings.anthropic_api_key)
 
@@ -40,19 +43,68 @@ def get_todays_entries(db, user_id: int) -> list[Entry]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     return (
         db.query(Entry)
-        .filter(Entry.user_id == user_id, Entry.created_at >= cutoff)
+        .filter(Entry.user_id == user_id, Entry.created_at >= cutoff, Entry.deleted_at.is_(None))
         .order_by(Entry.created_at.asc())
         .all()
     )
 
 
-def format_entries_for_llm(entries: list[Entry]) -> str:
-    """Convert entries to a text block for Claude to summarize."""
+def get_open_tasks(db, user_id: int) -> list[Task]:
+    """Get all open tasks."""
+    return (
+        db.query(Task).join(Entry)
+        .filter(Entry.user_id == user_id, Entry.deleted_at.is_(None), Task.status == "open")
+        .order_by(Task.priority.asc())
+        .all()
+    )
+
+
+def get_upcoming_events(db, user_id: int) -> list[CalendarEvent]:
+    """Get calendar events for the next 3 days."""
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=3)
+    return (
+        db.query(CalendarEvent).join(Entry)
+        .filter(Entry.user_id == user_id, Entry.deleted_at.is_(None),
+                CalendarEvent.start_time >= now, CalendarEvent.start_time <= future)
+        .order_by(CalendarEvent.start_time.asc())
+        .all()
+    )
+
+
+def format_entries_for_llm(entries: list[Entry], open_tasks: list[Task], upcoming: list[CalendarEvent]) -> str:
+    """Convert entries + context to a text block for Claude to summarize."""
     lines = []
+
+    # Today's entries
+    lines.append("== TODAY'S ENTRIES ==")
     for e in entries:
         time_str = e.created_at.strftime("%I:%M %p")
         content = e.processed_content or e.raw_transcript or "No content"
         lines.append(f"[{time_str}] [{e.module}] {e.title or 'Untitled'}: {content}")
+
+    # Tasks completed today
+    completed_today = [e for e in entries if e.module == "task" and e.task and e.task.status == "done"]
+    if completed_today:
+        lines.append("\n== TASKS COMPLETED TODAY ==")
+        for e in completed_today:
+            lines.append(f"  ✓ {e.task.description} [{e.task.group}]")
+
+    # Open tasks
+    if open_tasks:
+        lines.append(f"\n== OPEN TASKS ({len(open_tasks)} total) ==")
+        priority_labels = {"urgent": "URGENT", "do_today": "Today", "this_week": "This Week", "keep_in_mind": "Someday"}
+        for t in open_tasks:
+            lines.append(f"  [{priority_labels.get(t.priority, t.priority)}] {t.description} — {t.group}")
+
+    # Upcoming events
+    if upcoming:
+        lines.append("\n== UPCOMING EVENTS (next 3 days) ==")
+        for ev in upcoming:
+            time_str = ev.start_time.strftime("%A %I:%M %p") if ev.start_time else "TBD"
+            loc = f" @ {ev.location}" if ev.location else ""
+            lines.append(f"  {time_str}: {ev.title}{loc}")
+
     return "\n".join(lines)
 
 
@@ -61,10 +113,20 @@ def generate_summary(entries_text: str) -> str:
     response = client.messages.create(
         model=settings.intent_model,
         max_tokens=2048,
-        system="You write concise, well-organized daily summary emails. Format in HTML with clean styling. Group by category (calendar events, tasks, memos, mood, etc). Keep it brief but informative. Use a warm, personal tone.",
+        system="""You write concise, well-organized daily summary emails. Format in HTML with clean, inline styling.
+
+Structure the digest as:
+1. A brief 1-2 sentence overview of the day
+2. "What You Did" — grouped by category (calendar events, journal, memos)
+3. "Tasks Completed" — what got done today
+4. "Still Open" — open tasks, grouped by priority (show counts)
+5. "Coming Up" — next 3 days of events
+
+Use a warm, personal tone. Keep it scannable with headers and short bullets.
+Use a clean dark theme (background: #111820, text: #cdd5e0, accent: #6366f1) with inline CSS for email compatibility.""",
         messages=[{
             "role": "user",
-            "content": f"Here are all my planner entries from today. Create a daily digest email summarizing my day:\n\n{entries_text}"
+            "content": f"Here's my planner data. Create my daily digest email:\n\n{entries_text}"
         }],
     )
     return response.content[0].text
@@ -74,31 +136,33 @@ async def run_digest():
     """Main digest function."""
     db = SessionLocal()
     try:
-        # Get the first active user (single-user for now)
         user = db.query(User).filter(User.is_active == True).first()
         if not user:
-            print("No active users found.")
+            logger.warning("No active users found.")
             return
 
         entries = get_todays_entries(db, user.id)
-        if not entries:
-            print("No entries today. Skipping digest.")
+        open_tasks = get_open_tasks(db, user.id)
+        upcoming = get_upcoming_events(db, user.id)
+
+        if not entries and not open_tasks and not upcoming:
+            logger.info("No entries, tasks, or events. Skipping digest.")
             return
 
-        print(f"Found {len(entries)} entries. Generating summary...")
+        logger.info(f"Generating digest: {len(entries)} entries, {len(open_tasks)} open tasks, {len(upcoming)} upcoming events")
 
-        entries_text = format_entries_for_llm(entries)
+        entries_text = format_entries_for_llm(entries, open_tasks, upcoming)
         summary_html = generate_summary(entries_text)
 
         today = datetime.now().strftime("%A, %B %d")
-        subject = f"📋 Your Day — {today}"
+        subject = f"Your Day — {today}"
 
         success = await send_daily_digest(subject=subject, body_html=summary_html)
 
         if success:
-            print(f"✓ Daily digest sent for {today}")
+            logger.info(f"Daily digest sent for {today}")
         else:
-            print("✗ Failed to send digest")
+            logger.error("Failed to send digest")
 
     finally:
         db.close()

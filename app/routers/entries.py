@@ -28,7 +28,7 @@ def list_entries(
     db: Session = Depends(get_db),
 ) -> EntryListResponse:
     """List entries with pagination and optional filtering."""
-    query = db.query(Entry).filter(Entry.user_id == user.id)
+    query = db.query(Entry).filter(Entry.user_id == user.id, Entry.deleted_at.is_(None))
 
     if module:
         query = query.filter(Entry.module == module)

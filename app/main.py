@@ -3,6 +3,7 @@ main.py — Application Entry Point
 ====================================
 """
 import os
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Body
@@ -10,6 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.config import settings
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("planner")
 from app.database import engine, Base, get_db
 from app.schemas import HealthResponse
 from app.services.google_auth import is_google_connected
@@ -32,11 +41,11 @@ async def lifespan(app: FastAPI):
             conn.commit()
             print("Migration: added deleted_at column to entries")
 
-    print("Database tables created/verified")
-    print(f"Google Calendar: {'connected' if is_google_connected() else 'not connected'}")
-    print(f"Twilio SMS: {'configured' if is_twilio_configured() else 'not configured'}")
+    logger.info("Database tables created/verified")
+    logger.info(f"Google Calendar: {'connected' if is_google_connected() else 'not connected'}")
+    logger.info(f"Twilio SMS: {'configured' if is_twilio_configured() else 'not configured'}")
     yield
-    print("Server shutting down")
+    logger.info("Server shutting down")
 
 
 app = FastAPI(
@@ -49,7 +58,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

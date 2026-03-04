@@ -6,11 +6,14 @@ across different modules.
 """
 
 import json
+import re
+import logging
 import base64
 from datetime import datetime, timezone
 from anthropic import Anthropic
 from app.config import settings
 
+logger = logging.getLogger("planner.intent")
 client = Anthropic(api_key=settings.anthropic_api_key)
 
 INTENT_SYSTEM_PROMPT = """You are the brain of a personal planner system. You receive input that has been transcribed from voice, typed as text, or described from an image/screenshot. Your job is to:
@@ -186,20 +189,56 @@ async def classify_intent(
 
     raw_text = response.content[0].text.strip()
 
+    # Strip markdown code fences if LLM wraps response in ```json ... ```
+    if raw_text.startswith("```"):
+        raw_text = re.sub(r"^```(?:json)?\s*\n?", "", raw_text)
+        raw_text = re.sub(r"\n?```\s*$", "", raw_text)
+
     try:
         result = json.loads(raw_text)
-        # Handle both formats: {"intents": [...]} or old single-intent format
-        if isinstance(result, dict) and "intents" in result:
-            return result["intents"]
-        elif isinstance(result, list):
-            return result
-        else:
-            # Old single-intent format — wrap in list
-            return [result]
     except json.JSONDecodeError:
-        return [{
-            "module": "memo",
-            "title": "Voice Memo",
-            "spoken_response": "Got it — saved your memo.",
-            "data": {"content": transcript or "Image processed"},
-        }]
+        # Try fixing common LLM JSON issues: trailing commas
+        cleaned = re.sub(r",\s*([}\]])", r"\1", raw_text)
+        try:
+            result = json.loads(cleaned)
+            logger.warning("Fixed malformed JSON from LLM (trailing commas)")
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse intent JSON: {raw_text[:200]}")
+            return [{
+                "module": "memo",
+                "title": "Voice Memo",
+                "spoken_response": "Got it — saved your memo.",
+                "data": {"content": transcript or "Image processed"},
+            }]
+
+    # Handle various response formats
+    if isinstance(result, dict) and "intents" in result:
+        intents = result["intents"]
+    elif isinstance(result, list):
+        intents = result
+    else:
+        # Old single-intent format — wrap in list
+        intents = [result]
+
+    # Validate each intent has required fields
+    validated = []
+    for intent in intents:
+        if not isinstance(intent, dict):
+            logger.warning(f"Skipping non-dict intent: {intent}")
+            continue
+        if "module" not in intent:
+            intent["module"] = "memo"
+        if "data" not in intent:
+            intent["data"] = {"content": transcript or ""}
+        if "spoken_response" not in intent:
+            intent["spoken_response"] = "Saved."
+        if "title" not in intent:
+            intent["title"] = intent.get("data", {}).get("content", "Entry")[:80] or "Entry"
+        validated.append(intent)
+
+    return validated if validated else [{
+        "module": "memo",
+        "title": "Voice Memo",
+        "spoken_response": "Got it — saved your memo.",
+        "data": {"content": transcript or "Image processed"},
+    }]

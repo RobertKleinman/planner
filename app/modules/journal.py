@@ -20,6 +20,7 @@ async def handle_journal(user, raw_input, intent_data, db, input_type="audio", i
 
     created = []
     first_entry_id = None
+    pending = []
 
     for activity in activities:
         topic = activity.get("topic")
@@ -37,19 +38,24 @@ async def handle_journal(user, raw_input, intent_data, db, input_type="audio", i
             title=activity.get("content", "Journal")[:80],
             module="journal", module_data=json.dumps(activity),
         )
-        db.add(entry); db.commit(); db.refresh(entry)
-        if first_entry_id is None:
-            first_entry_id = entry.id
-
-        journal = JournalEntry(
-            entry_id=entry.id, content=activity.get("content", ""),
-            activity_type=activity.get("activity_type", "general"),
-            topic=topic, date=datetime.now(timezone.utc),
-        )
-        db.add(journal); db.commit()
-        created.append(journal)
+        db.add(entry)
+        pending.append({"entry": entry, "content": activity.get("content", ""), "activity_type": activity.get("activity_type", "general"), "topic": topic})
         if topic and topic not in existing_topics:
             existing_topics.append(topic)
+
+    # Flush to get entry IDs, then create all journal entries
+    db.flush()
+    for info in pending:
+        if first_entry_id is None:
+            first_entry_id = info["entry"].id
+        journal = JournalEntry(
+            entry_id=info["entry"].id, content=info["content"],
+            activity_type=info["activity_type"],
+            topic=info["topic"], date=datetime.now(timezone.utc),
+        )
+        db.add(journal)
+        created.append(journal)
+    db.commit()
 
     if len(created) == 1:
         topic_str = f" [{created[0].topic}]" if created[0].topic else ""
