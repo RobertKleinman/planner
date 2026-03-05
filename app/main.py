@@ -41,6 +41,13 @@ async def lifespan(app: FastAPI):
             conn.commit()
             print("Migration: added deleted_at column to entries")
 
+        # Migration: add tags column to journal_entries
+        je_columns = [c["name"] for c in inspector.get_columns("journal_entries")]
+        if "tags" not in je_columns:
+            conn.execute(text("ALTER TABLE journal_entries ADD COLUMN tags VARCHAR"))
+            conn.commit()
+            logger.info("Migration: added tags column to journal_entries")
+
     logger.info("Database tables created/verified")
     logger.info(f"Google Calendar: {'connected' if is_google_connected() else 'not connected'}")
     logger.info(f"Twilio SMS: {'configured' if is_twilio_configured() else 'not configured'}")

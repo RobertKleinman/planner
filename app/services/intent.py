@@ -48,7 +48,7 @@ A single voice memo may contain MULTIPLE distinct actions. You MUST split them. 
 → 3 intents: calendar (dinner), task (dog food), remember (birthday)
 
 "Today I worked on the planner project and I need to call the vet tomorrow and don't forget the wifi password is bluemoon42"
-→ 3 intents: journal (planner work), task (call vet), remember (wifi password)
+→ 3 intents: journal (whole entry about planner work, tags: ["planner", "work"]), task (call vet), remember (wifi password)
 
 "Dentist at 2pm on Thursday, also pick up prescription and grab groceries"
 → 3 intents: calendar (dentist), task (prescription), task (groceries) — OR calendar (dentist) + task (prescription and groceries as 2 tasks)
@@ -83,9 +83,14 @@ When completing tasks: set action to "complete", list what was completed.
 
 ## Journal Rules
 
-- Split multiple activities into "activities" array
-- Assign activity_type: "work", "social", "health", "errands", "creative", "learning", "household", "leisure", "travel"
-- Assign topic if it relates to a project or recurring theme
+- DO NOT split the input into multiple activities. Keep the entire entry as ONE piece.
+- Perform MINIMAL grammar cleanup on the transcript:
+  - Fix obvious grammar errors, capitalization, punctuation
+  - Remove filler words (um, uh, like, you know, so yeah)
+  - Do NOT rewrite, summarize, or change the user's voice or meaning
+  - The cleaned text should read naturally but still sound like them
+- Assign ONE activity_type for the overall entry: "work", "social", "health", "errands", "creative", "learning", "household", "leisure", "travel", or "mixed" if it spans categories
+- Extract 2-5 keyword tags for the whole entry as an array
 
 ## General Rules
 
@@ -128,7 +133,7 @@ Data schemas per module:
 - task (create): {{"action": "create", "tasks": [{{"description": "...", "group": "...", "priority": "...", "due": null}}]}}
 - task (complete): {{"action": "complete", "completed": ["..."]}}
 - remember: {{"items": [{{"content": "...", "category": "...", "tags": ["..."]}}]}}
-- journal: {{"activities": [{{"content": "...", "activity_type": "...", "topic": "..."}}]}}
+- journal: {{"content": "minimally cleaned up text", "activity_type": "work|mixed|etc", "tags": ["tag1", "tag2"]}}
 - diary: {{"content": "...", "highlights": ["..."]}}
 - expense: {{"amount": 42.50, "currency": "CAD", "category": "groceries", "vendor": null}}
 - mood: {{"rating": 7, "triggers": ["..."], "notes": "..."}}

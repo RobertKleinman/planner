@@ -11,7 +11,7 @@ routers/dashboard.py — Web Dashboard
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, and_, or_
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
@@ -329,9 +329,9 @@ async def add_journal(request: Request, db: Session = Depends(get_db)):
     db.refresh(entry)
 
     activity_type = body.get("activity_type", "").strip().lower()
-    topic = body.get("topic", "").strip()
+    tags = body.get("tags", "").strip()
 
-    je = JournalEntry(entry_id=entry.id, content=content, activity_type=activity_type, topic=topic, date=datetime.now(timezone.utc).date())
+    je = JournalEntry(entry_id=entry.id, content=content, activity_type=activity_type, tags=tags if tags else None, date=datetime.now(timezone.utc).date())
     db.add(je)
     db.commit()
     return JSONResponse(content={"ok": True, "id": je.id})
@@ -359,8 +359,9 @@ async def edit_journal(entry_id: int, request: Request, db: Session = Depends(ge
     if "activity_type" in body:
         je.activity_type = body.get("activity_type", "").strip().lower()
 
-    if "topic" in body:
-        je.topic = body.get("topic", "").strip()
+    if "tags" in body:
+        tags = body.get("tags", "").strip()
+        je.tags = tags if tags else None
 
     db.commit()
     logger.info(f"Journal entry {entry_id} edited by user {user.id}")
@@ -480,7 +481,7 @@ async def search_entries(request: Request, db: Session = Depends(get_db)):
                 "id": entry.journal_entry.id,
                 "entry_id": entry.id,
                 "content": entry.journal_entry.content[:80],
-                "topic": entry.journal_entry.topic
+                "tags": entry.journal_entry.tags or entry.journal_entry.topic or ""
             })
         elif entry.module == "memo":
             results["memos"].append({
@@ -635,7 +636,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     past_ev = db.query(CalendarEvent).join(Entry).filter(Entry.user_id == user.id, _not_deleted(), CalendarEvent.start_time < now).order_by(CalendarEvent.start_time.desc()).limit(10).all()
     memos = db.query(Entry).filter(Entry.user_id == user.id, Entry.module == "memo", _not_deleted()).order_by(Entry.created_at.desc()).limit(20).all()
     remember_items = db.query(RememberItem).join(Entry).filter(Entry.user_id == user.id, _not_deleted()).order_by(RememberItem.created_at.desc()).all()
-    journal_entries = db.query(JournalEntry).join(Entry).filter(Entry.user_id == user.id, _not_deleted()).order_by(JournalEntry.date.desc()).limit(50).all()
+    journal_entries = db.query(JournalEntry).join(Entry).options(joinedload(JournalEntry.entry)).filter(Entry.user_id == user.id, _not_deleted()).order_by(JournalEntry.date.desc()).limit(50).all()
 
     # Trash
     trashed = db.query(Entry).filter(Entry.user_id == user.id, Entry.deleted_at.isnot(None)).order_by(Entry.deleted_at.desc()).all()
@@ -878,9 +879,42 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
     jbd = defaultdict(list)
     for j in journal_entries: jbd[_day_key(j.date)].append(j)
 
-    all_topics = defaultdict(list)
+    # Collect all unique tags across journal entries for the sidebar
+    all_tags = defaultdict(int)
     for j in journal_entries:
-        if j.topic: all_topics[j.topic].append(j)
+        tag_source = j.tags or j.topic or ""
+        for t in tag_source.split(","):
+            t = t.strip()
+            if t:
+                all_tags[t] += 1
+
+    def _render_journal_item(j):
+        """Render a single journal entry with tags and optional raw transcript."""
+        # Build tags HTML — prefer new tags field, fall back to legacy topic
+        tag_source = j.tags or j.topic or ""
+        tags_html = ""
+        if tag_source:
+            tags_html = " ".join(f'<span class="tag">{_e(t.strip())}</span>' for t in tag_source.split(",") if t.strip())
+        atype = f'<span class="tag">{(j.activity_type or "").replace("_"," ").title()}</span>' if j.activity_type and j.activity_type != "general" else ""
+
+        # Show raw transcript toggle if it differs from cleaned content
+        raw_html = ""
+        raw = j.entry.raw_transcript if j.entry else None
+        if raw and raw.strip() != j.content.strip():
+            raw_html = f'''<details style="margin-top:6px;font-size:12px;color:#999;">
+                <summary style="cursor:pointer;user-select:none;">View original transcript</summary>
+                <div style="background:rgba(255,255,255,0.05);padding:8px;margin-top:4px;border-radius:4px;white-space:pre-wrap;">{_e(raw)}</div>
+            </details>'''
+
+        return f'''<div class="item" id="entry-{j.entry_id}">
+            <div class="journal-row">
+                <div class="editable" data-type="journal" data-id="{j.entry_id}" data-field="content" onclick="makeEditable(this)">{_e(j.content)}</div>
+                <button class="del-btn" onclick="trashItem({j.entry_id})" title="Move to trash">&#128465;</button>
+            </div>
+            {tags_html} {atype}
+            {raw_html}
+            <div class="ts">{_fmt(j.created_at)}</div>
+        </div>'''
 
     journal_html = ""
     if jbd:
@@ -892,29 +926,11 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
             if work_items:
                 journal_html += '<div class="section-label"><span class="section-icon">&#128188;</span> Work</div>'
                 for j in work_items:
-                    topic = f'<span class="topic-tag">{_e(j.topic)}</span>' if j.topic else ""
-                    atype = f'<span class="tag">{(j.activity_type or "").replace("_"," ").title()}</span>' if j.activity_type else ""
-                    journal_html += f'''<div class="item" id="entry-{j.entry_id}">
-                        <div class="journal-row">
-                            <div class="editable" data-type="journal" data-id="{j.entry_id}" data-field="content" onclick="makeEditable(this)">{_e(j.content)}</div>
-                            <button class="del-btn" onclick="trashItem({j.entry_id})" title="Move to trash">&#128465;</button>
-                        </div>
-                        {topic} {atype}
-                        <div class="ts">{_fmt(j.created_at)}</div>
-                    </div>'''
+                    journal_html += _render_journal_item(j)
             if life_items:
                 journal_html += '<div class="section-label"><span class="section-icon">&#127793;</span> Life</div>'
                 for j in life_items:
-                    topic = f'<span class="topic-tag">{_e(j.topic)}</span>' if j.topic else ""
-                    atype = f'<span class="tag">{(j.activity_type or "").replace("_"," ").title()}</span>' if j.activity_type else ""
-                    journal_html += f'''<div class="item" id="entry-{j.entry_id}">
-                        <div class="journal-row">
-                            <div class="editable" data-type="journal" data-id="{j.entry_id}" data-field="content" onclick="makeEditable(this)">{_e(j.content)}</div>
-                            <button class="del-btn" onclick="trashItem({j.entry_id})" title="Move to trash">&#128465;</button>
-                        </div>
-                        {topic} {atype}
-                        <div class="ts">{_fmt(j.created_at)}</div>
-                    </div>'''
+                    journal_html += _render_journal_item(j)
     else:
         journal_html = '<div class="empty-state"><div class="empty-icon">&#128214;</div><div>Tell me what you did today</div></div>'
 
@@ -930,7 +946,7 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
                 <option value="creative">Creative</option>
                 <option value="reflection">Reflection</option>
             </select>
-            <input type="text" id="journal-topic" placeholder="Topic/Project">
+            <input type="text" id="journal-tags" placeholder="Tags (comma separated)">
         </div>
         <div class="form-actions">
             <button class="btn btn-ghost" onclick="toggleForm('journal-form')">Cancel</button>
@@ -939,12 +955,11 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
     </div>'''
 
     topics_html = ""
-    if all_topics:
-        topics_html = '<div class="card"><div class="card-title">Topics &amp; Projects</div>'
-        for topic in sorted(all_topics.keys()):
-            count = len(all_topics[topic])
-            latest = all_topics[topic][0]
-            topics_html += f'<div class="topic-row"><div class="topic-name">{_e(topic)}</div><div class="topic-meta"><span class="tag">{count} entries</span><span class="ts">{_e(latest.content[:50])}</span></div></div>'
+    if all_tags:
+        topics_html = '<div class="card"><div class="card-title">Tags</div>'
+        for tag in sorted(all_tags.keys(), key=lambda t: all_tags[t], reverse=True):
+            count = all_tags[tag]
+            topics_html += f'<div class="topic-row"><div class="topic-name">{_e(tag)}</div><div class="topic-meta"><span class="tag">{count} entries</span></div></div>'
         topics_html += '</div>'
 
     # ── Memos ──
@@ -1435,8 +1450,8 @@ async function addJournalEntry(){{
     const c=document.getElementById('journal-content').value.trim();
     if(!c)return;
     const t=document.getElementById('journal-activity').value;
-    const top=document.getElementById('journal-topic').value.trim();
-    await api('POST','/dashboard/api/journal',{{content:c,activity_type:t,topic:top}});
+    const tags=document.getElementById('journal-tags').value.trim();
+    await api('POST','/dashboard/api/journal',{{content:c,activity_type:t,tags:tags}});
     location.reload();
 }}
 async function addRemember(){{

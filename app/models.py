@@ -105,7 +105,8 @@ class JournalEntry(Base):
 
     content = Column(Text, nullable=False)
     activity_type = Column(String, nullable=True)
-    topic = Column(String, nullable=True, index=True)
+    topic = Column(String, nullable=True, index=True)  # legacy — use tags for new entries
+    tags = Column(String, nullable=True)  # comma-separated: "gym,social,sarah"
     date = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

@@ -111,8 +111,9 @@ async def auto_complete_tasks(user: User, intents: list, db: Session) -> list:
             continue
 
         if module == "journal":
-            for act in data.get("activities", []):
-                actions_done.append(act.get("content", ""))
+            content = data.get("content", "")
+            if content:
+                actions_done.append(content)
         elif module == "food":
             items = data.get("items", [])
             if items:
