@@ -1363,7 +1363,7 @@ async function performSearch(){{
                 html+='<div class="search-result-group"><div class="search-result-title">'+type+'</div>';
                 items.forEach(i=>{{
                     const text=(i.description||i.title||i.content||'').substring(0,60);
-                    html+='<div class="search-result-item" onclick="closeSearchModal();window.location.hash=\''+type+'\';setTimeout(()=>window.location.reload(),100)">'+_esc(text)+'</div>';
+                    html+='<div class="search-result-item" onclick="closeSearchModal();window.location.hash=\\''+type+'\\';setTimeout(()=>window.location.reload(),100)">'+_esc(text)+'</div>';
                 }});
                 html+='</div>';
             }}
@@ -1426,10 +1426,10 @@ async function addCalendarEvent(){{
     const date=document.getElementById('cal-date').value;
     const time=document.getElementById('cal-start-time').value;
     const endTime=document.getElementById('cal-end-time').value;
-    const location=document.getElementById('cal-location').value.trim();
+    const loc=document.getElementById('cal-location').value.trim();
     if(!title||!date||!time)return;
-    await api('POST','/dashboard/api/calendar',{{title:title,date:date,time:time,end_time:endTime,location:location}});
-    location.reload();
+    await api('POST','/dashboard/api/calendar',{{title:title,date:date,time:time,end_time:endTime,location:loc}});
+    window.location.reload();
 }}
 async function addJournalEntry(){{
     const c=document.getElementById('journal-content').value.trim();
