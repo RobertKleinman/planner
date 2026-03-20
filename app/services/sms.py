@@ -29,7 +29,7 @@ def is_twilio_configured() -> bool:
     )
 
 
-async def send_sms(to_number: str, message: str) -> bool:
+def send_sms(to_number: str, message: str) -> bool:
     """
     Send an SMS message.
 
@@ -58,7 +58,7 @@ async def send_sms(to_number: str, message: str) -> bool:
         return False
 
 
-async def notify_johnny(event_title: str, event_time: str, location: str = None):
+def notify_johnny(event_title: str, event_time: str, location: str = None):
     """
     Convenience function: text Johnny about a calendar event.
     """
@@ -70,4 +70,4 @@ async def notify_johnny(event_title: str, event_time: str, location: str = None)
     if location:
         message += f"\n📍 {location}"
 
-    return await send_sms(settings.johnny_phone_number, message)
+    return send_sms(settings.johnny_phone_number, message)

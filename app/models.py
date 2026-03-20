@@ -19,6 +19,7 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=False)
     api_key_hash = Column(String, nullable=False)
+    telegram_chat_id = Column(String, nullable=True, unique=True, index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -47,6 +48,7 @@ class Entry(Base):
     task = relationship("Task", back_populates="entry", uselist=False)
     remember_item = relationship("RememberItem", back_populates="entry", uselist=False)
     journal_entry = relationship("JournalEntry", back_populates="entry", uselist=False)
+    memo_topic_links = relationship("MemoTopicEntry", back_populates="entry", cascade="all, delete-orphan")
 
 
 class CalendarEvent(Base):
@@ -111,6 +113,48 @@ class JournalEntry(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     entry = relationship("Entry", back_populates="journal_entry")
+
+
+class MemoTopic(Base):
+    __tablename__ = "memo_topics"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    name = Column(String, nullable=False)           # "House Renovation"
+    description = Column(Text, nullable=True)       # optional context for LLM matching
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
+    linked_entries = relationship("MemoTopicEntry", back_populates="memo_topic", cascade="all, delete-orphan")
+
+
+class MemoTopicEntry(Base):
+    __tablename__ = "memo_topic_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    memo_topic_id = Column(Integer, ForeignKey("memo_topics.id", ondelete="CASCADE"), nullable=False)
+    entry_id = Column(Integer, ForeignKey("entries.id", ondelete="CASCADE"), nullable=False)
+
+    excerpt = Column(Text, nullable=True)           # LLM-generated excerpt of what's relevant
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    memo_topic = relationship("MemoTopic", back_populates="linked_entries")
+    entry = relationship("Entry", back_populates="memo_topic_links")
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    session_id = Column(String, nullable=False, index=True)  # "telegram:<chat_id>" or "api:<uuid>"
+    role = Column(String, nullable=False)  # "user" or "assistant"
+    content = Column(Text, nullable=False)  # JSON-serialized Anthropic content blocks
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+    user = relationship("User")
 
 
 class NotificationContact(Base):

@@ -15,7 +15,7 @@ from app.services.google_auth import get_gmail_service
 from app.config import settings
 
 
-async def send_email(to_email: str, subject: str, body_html: str) -> bool:
+def send_email(to_email: str, subject: str, body_html: str) -> bool:
     """
     Send an email via Gmail API.
 
@@ -57,9 +57,9 @@ async def send_email(to_email: str, subject: str, body_html: str) -> bool:
         return False
 
 
-async def send_daily_digest(subject: str, body_html: str) -> bool:
+def send_daily_digest(subject: str, body_html: str) -> bool:
     """Convenience: send the daily digest to the configured recipient."""
     if not settings.digest_recipient_email:
         print("⚠ Digest recipient email not configured.")
         return False
-    return await send_email(settings.digest_recipient_email, subject, body_html)
+    return send_email(settings.digest_recipient_email, subject, body_html)

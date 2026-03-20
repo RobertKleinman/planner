@@ -19,7 +19,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("planner")
-from app.database import engine, Base, get_db
+from app.database import engine, Base, get_db, database_url
 from app.schemas import HealthResponse
 from app.services.google_auth import is_google_connected
 from app.services.sms import is_twilio_configured
@@ -48,10 +48,72 @@ async def lifespan(app: FastAPI):
             conn.commit()
             logger.info("Migration: added tags column to journal_entries")
 
+        # Migration: add telegram_chat_id to users
+        user_columns = [c["name"] for c in inspector.get_columns("users")]
+        if "telegram_chat_id" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN telegram_chat_id VARCHAR"))
+            conn.commit()
+            logger.info("Migration: added telegram_chat_id column to users")
+
+        # Migration: fix memo_topic_entries.entry_id FK to CASCADE on delete
+        # PostgreSQL: drop old FK, add new one with ON DELETE CASCADE
+        # SQLite: no ALTER CONSTRAINT support, but new tables get it from model definition
+        if not database_url.startswith("sqlite"):
+            try:
+                # Check if constraint already has CASCADE (idempotent)
+                result = conn.execute(text("""
+                    SELECT confdeltype FROM pg_constraint
+                    WHERE conrelid = 'memo_topic_entries'::regclass
+                    AND conname LIKE '%entry_id%'
+                """))
+                row = result.fetchone()
+                if row and row[0] != 'c':  # 'c' = CASCADE
+                    conn.execute(text("""
+                        ALTER TABLE memo_topic_entries
+                        DROP CONSTRAINT IF EXISTS memo_topic_entries_entry_id_fkey
+                    """))
+                    conn.execute(text("""
+                        ALTER TABLE memo_topic_entries
+                        ADD CONSTRAINT memo_topic_entries_entry_id_fkey
+                        FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+                    """))
+                    conn.commit()
+                    logger.info("Migration: added CASCADE to memo_topic_entries.entry_id FK")
+            except Exception as e:
+                logger.warning(f"FK migration skipped (table may not exist yet): {e}")
+
     logger.info("Database tables created/verified")
     logger.info(f"Google Calendar: {'connected' if is_google_connected() else 'not connected'}")
     logger.info(f"Twilio SMS: {'configured' if is_twilio_configured() else 'not configured'}")
+
+    # Set up Telegram webhook if configured
+    if settings.telegram_bot_token and settings.app_base_url:
+        try:
+            from aiogram import Bot
+            bot = Bot(token=settings.telegram_bot_token)
+            webhook_url = f"{settings.app_base_url.rstrip('/')}/telegram/webhook"
+            await bot.set_webhook(
+                url=webhook_url,
+                secret_token=settings.telegram_webhook_secret or None,
+            )
+            logger.info(f"Telegram webhook set: {webhook_url}")
+            await bot.session.close()
+        except Exception as e:
+            logger.warning(f"Failed to set Telegram webhook: {e}")
+
     yield
+
+    # Clean up Telegram webhook on shutdown
+    if settings.telegram_bot_token:
+        try:
+            from aiogram import Bot
+            bot = Bot(token=settings.telegram_bot_token)
+            await bot.delete_webhook()
+            await bot.session.close()
+            logger.info("Telegram webhook deleted")
+        except Exception as e:
+            logger.warning(f"Failed to delete Telegram webhook: {e}")
+
     logger.info("Server shutting down")
 
 
@@ -70,10 +132,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from app.routers import input, entries, dashboard
+from app.routers import input, entries, dashboard, search
 app.include_router(input.router)
 app.include_router(entries.router)
 app.include_router(dashboard.router)
+app.include_router(search.router)
+
+if settings.telegram_bot_token:
+    from app.routers import telegram
+    app.include_router(telegram.router)
+    logger.info("Telegram bot router enabled")
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
@@ -88,7 +156,7 @@ def health_check():
 
 
 @app.post("/setup-user", tags=["system"])
-async def setup_user(db: Session = Depends(get_db)):
+def setup_user(db: Session = Depends(get_db)):
     """One-time setup for the primary user using PLANNER_API_KEY from environment."""
     existing = db.query(models.User).first()
     if existing:
@@ -110,7 +178,7 @@ async def setup_user(db: Session = Depends(get_db)):
 
 
 @app.post("/admin/create-user", tags=["system"])
-async def create_user(
+def create_user(
     name: str = Body(...),
     email: str = Body(...),
     phone: str = Body(None, description="Phone number for SMS notifications"),

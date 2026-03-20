@@ -13,7 +13,7 @@ from app.models import User, Entry, JournalEntry
 from app.schemas import InputResponse
 
 
-async def handle_journal(user, raw_input, intent_data, db, input_type="audio", image_description=None):
+def handle_journal(user, raw_input, intent_data, db, input_type="audio", image_description=None):
     data = intent_data.get("data", {})
 
     # New format: single content + tags (no activities array)

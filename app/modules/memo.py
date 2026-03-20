@@ -22,7 +22,7 @@ from app.models import User, Entry
 from app.schemas import InputResponse
 
 
-async def handle_memo(
+def handle_memo(
     user: User,
     raw_input: str,
     intent_data: dict,

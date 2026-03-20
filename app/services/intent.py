@@ -10,99 +10,77 @@ import re
 import logging
 import base64
 from datetime import datetime, timezone
-from anthropic import Anthropic
 from app.config import settings
+from app.services.clients import anthropic_client
 
 logger = logging.getLogger("planner.intent")
-client = Anthropic(api_key=settings.anthropic_api_key)
 
-INTENT_SYSTEM_PROMPT = """You are the brain of a personal planner system. You receive input that has been transcribed from voice, typed as text, or described from an image/screenshot. Your job is to:
+INTENT_SYSTEM_PROMPT = """You are the brain of a personal planner. You receive voice transcripts, text, or image descriptions and classify them into intents.
 
-1. Identify ALL distinct actions/intents in the input — there may be MULTIPLE.
-2. For EACH action, classify the MODULE, extract STRUCTURED DATA, and generate a confirmation.
-3. Return an array of intents.
+1. Identify ALL distinct actions in the input — there may be MULTIPLE.
+2. For each, classify the MODULE, extract structured data, generate a brief spoken confirmation.
+3. Return a JSON array of intents.
 
-## Available Modules
+## Modules (5 only)
 
-- **memo**: General note or thought. DEFAULT if nothing else fits.
-- **calendar**: They want to create a calendar event. Extract title, start time, end time, location.
-- **task**: Action items, to-do items, things they need to do, errands.
-  - Creating: "I need to pick up dry cleaning and buy dog food"
-  - Completing: "I finished picking up the dry cleaning"
-- **remember**: Things they want to REMEMBER — facts, info, preferences, references. Key phrases: "remember that", "don't forget", "keep in mind", "note that".
-- **journal**: Recording what they DID — activities, experiences, how they spent their time. Past tense or present tense.
-- **diary**: Deep personal reflection, feelings, emotional processing.
-- **screenshot_note**: Input is from an image/screenshot.
-- **expense**: Money spent.
-- **food**: Food eaten.
-- **mood**: How they're feeling.
-- **idea**: A business/creative/project idea.
-- **gym**: Exercise or workout.
-- **work**: Work accomplishment or project update.
+- **memo** — Catch-all for notes, thoughts, observations, reflections, feelings, ideas, expenses, food, workouts, moods, screenshots. Anything that's "save this" without a specific action. DEFAULT if unsure.
+- **journal** — Recording what they DID — activities, experiences, how they spent their time.
+- **calendar** — Events with specific date/time. Extract title, start, end, location.
+- **task** — Action items, to-dos, things to do. Also task completion ("I finished X").
+- **remember** — Facts to recall later: passwords, preferences, references, people's info. Key phrases: "remember that", "don't forget", "the password is".
 
-## CRITICAL: Multi-Intent Detection
+## Multi-Intent Detection
 
-A single voice memo may contain MULTIPLE distinct actions. You MUST split them. Examples:
+Split distinct actions. Examples:
 
-"Schedule dinner with Johnny at 7 and I need to buy dog food and remember his mom's birthday is March 15"
-→ 3 intents: calendar (dinner), task (dog food), remember (birthday)
+"Schedule dinner at 7 and buy dog food and remember the wifi password is bluemoon42"
+→ calendar (dinner), task (dog food), remember (wifi password)
 
-"Today I worked on the planner project and I need to call the vet tomorrow and don't forget the wifi password is bluemoon42"
-→ 3 intents: journal (whole entry about planner work, tags: ["planner", "work"]), task (call vet), remember (wifi password)
+"Today I worked on the planner and I need to call the vet"
+→ journal (planner work), task (call vet)
 
-"Dentist at 2pm on Thursday, also pick up prescription and grab groceries"
-→ 3 intents: calendar (dentist), task (prescription), task (groceries) — OR calendar (dentist) + task (prescription and groceries as 2 tasks)
-
-If there is only ONE action, still return an array with one item.
+One action = array with one item.
 
 ## Classification Tips
 
-- "I need to..." / "I have to..." / "gotta..." = **task**
-- "Remember that..." / "Don't forget..." / "The password is..." = **remember**
-- "Today I..." / "Just finished..." / "Worked on..." = **journal**
-- "I feel..." / deep emotional reflection = **diary** or **mood**
+- "I need to..." / "gotta..." = **task**
+- "Remember that..." / "The password is..." = **remember**
+- "Today I..." / "Just finished..." = **journal**
 - Specific time + event = **calendar**
-- If factual info to look up later → **remember**
-- If describing activities done → **journal**
+- Everything else (feelings, ideas, expenses, food, workouts, reflections) = **memo**
 
 ## Task Rules
 
-When creating tasks:
-- Split multiple items into separate tasks in the "tasks" array
-- Assign GROUP: "Errands", "House", "Work", "Health", "Dogs", "Personal", "Finance", "Shopping", etc.
-- Assign PRIORITY: "urgent", "do_today", "this_week", "keep_in_mind" (default "this_week")
-- Extract due dates when mentioned
+Creating: split into separate tasks in "tasks" array.
+- GROUP: "Errands", "House", "Work", "Health", "Dogs", "Personal", "Finance", "Shopping", etc.
+- PRIORITY: "urgent", "do_today", "this_week", "keep_in_mind" (default "this_week")
+- Extract due dates when mentioned.
 
-When completing tasks: set action to "complete", list what was completed.
+Completing: set action to "complete", list what was completed.
 
 ## Remember Rules
 
 - Split multiple items into "items" array
-- Assign CATEGORY: "People", "Passwords", "Health", "Finance", "Home", "Work", "Travel", "Food", "Reference", "Personal", etc.
+- CATEGORY: "People", "Passwords", "Health", "Finance", "Home", "Work", "Travel", "Food", "Reference", "Personal"
 - Extract tags as keywords
 
 ## Journal Rules
 
-- DO NOT split the input into multiple activities. Keep the entire entry as ONE piece.
-- Perform MINIMAL grammar cleanup on the transcript:
-  - Fix obvious grammar errors, capitalization, punctuation
-  - Remove filler words (um, uh, like, you know, so yeah)
-  - Do NOT rewrite, summarize, or change the user's voice or meaning
-  - The cleaned text should read naturally but still sound like them
-- Assign ONE activity_type for the overall entry: "work", "social", "health", "errands", "creative", "learning", "household", "leisure", "travel", or "mixed" if it spans categories
-- Extract 2-5 keyword tags for the whole entry as an array
+- Keep entire entry as ONE piece (don't split activities)
+- MINIMAL grammar cleanup: fix errors, remove filler words, keep their voice
+- activity_type: "work", "social", "health", "errands", "creative", "learning", "household", "leisure", "travel", "mixed"
+- Extract 2-5 keyword tags
 
 ## General Rules
 
-- Current date and time: {current_datetime}
+- Current date/time: {current_datetime}
 - Timezone: {timezone}
-- Resolve relative dates to ISO 8601 datetime strings.
-- If no end time for calendar events, assume 1 hour duration.
-- Each spoken_response should be brief.
+- Resolve relative dates to ISO 8601. If no end time for calendar, assume 1 hour.
+- spoken_response: brief, conversational.
 
 ## Response Format
 
-Respond with ONLY valid JSON (no markdown, no backticks). ALWAYS return an array:
+ONLY valid JSON (no markdown, no backticks):
 
 {{
   "intents": [
@@ -117,43 +95,61 @@ Respond with ONLY valid JSON (no markdown, no backticks). ALWAYS return an array
       "title": "Buy dog food",
       "spoken_response": "Added task: buy dog food.",
       "data": {{"action": "create", "tasks": [{{"description": "Buy dog food", "group": "Errands", "priority": "this_week", "due": null}}]}}
-    }},
-    {{
-      "module": "remember",
-      "title": "Johnny's mom birthday",
-      "spoken_response": "Noted: Johnny's mom's birthday is March 15.",
-      "data": {{"items": [{{"content": "Johnny's mom's birthday is March 15", "category": "People", "tags": ["johnny", "birthday"]}}]}}
     }}
   ]
 }}
 
-Data schemas per module:
-- calendar: {{"title": "...", "start": "ISO", "end": "ISO", "location": null, "notify_partner": true|false}}
+Data schemas:
 - memo: {{"content": "..."}}
+- journal: {{"content": "cleaned up text", "activity_type": "work|mixed|etc", "tags": ["tag1", "tag2"]}}
+- calendar: {{"title": "...", "start": "ISO", "end": "ISO", "location": null, "notify_partner": true|false}}
 - task (create): {{"action": "create", "tasks": [{{"description": "...", "group": "...", "priority": "...", "due": null}}]}}
 - task (complete): {{"action": "complete", "completed": ["..."]}}
 - remember: {{"items": [{{"content": "...", "category": "...", "tags": ["..."]}}]}}
-- journal: {{"content": "minimally cleaned up text", "activity_type": "work|mixed|etc", "tags": ["tag1", "tag2"]}}
-- diary: {{"content": "...", "highlights": ["..."]}}
-- expense: {{"amount": 42.50, "currency": "CAD", "category": "groceries", "vendor": null}}
-- mood: {{"rating": 7, "triggers": ["..."], "notes": "..."}}
-- idea: {{"concept": "...", "category": "business|creative|project|other", "action_steps": []}}
-- gym: {{"exercises": [{{"name": "...", "sets": 3, "reps": 10, "weight_lbs": 135}}], "type": "strength"}}
-- work: {{"project": null, "description": "...", "metrics": null}}"""
+
+{memo_topics_section}"""
 
 
-async def classify_intent(
+def _build_memo_topics_section(memo_topics) -> str:
+    """Build the memo topics prompt section from user's active topics."""
+    if not memo_topics:
+        return ""
+    lines = [
+        "## Memo Topic Matching",
+        "",
+        "The user has defined memo topics below. For EACH intent you return, check if it relates to any of these topics.",
+        "If it does, include a \"memo_topics\" array in that intent object with the matched topic names and a brief excerpt.",
+        "",
+        "Active topics:",
+    ]
+    for t in memo_topics:
+        desc = f": {t.description}" if t.description else ""
+        lines.append(f"- \"{t.name}\"{desc}")
+    lines += [
+        "",
+        "For each matched topic, add to the intent:",
+        "  \"memo_topics\": [{\"name\": \"Topic Name\", \"excerpt\": \"Brief 1-2 sentence summary of what's relevant\"}]",
+        "",
+        "Only match when there's a genuine connection. Don't force matches. Omit memo_topics if nothing matches.",
+    ]
+    return "\n".join(lines)
+
+
+def classify_intent(
     transcript: str = None,
     image_bytes: bytes = None,
     image_media_type: str = "image/jpeg",
+    memo_topics: list = None,
 ) -> list:
     """
     Returns a LIST of intent dicts — one per detected action.
+    memo_topics: list of MemoTopic objects (user's active topics for matching).
     """
     current_dt = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
     system = INTENT_SYSTEM_PROMPT.format(
         current_datetime=current_dt,
         timezone=settings.timezone,
+        memo_topics_section=_build_memo_topics_section(memo_topics),
     )
 
     content = []
@@ -185,7 +181,7 @@ async def classify_intent(
             "text": "Analyze this image and classify what type of information it contains."
         })
 
-    response = client.messages.create(
+    response = anthropic_client.messages.create(
         model=settings.intent_model,
         max_tokens=2048,
         system=system,

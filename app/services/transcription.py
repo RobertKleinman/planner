@@ -9,14 +9,12 @@ WHAT CHANGED FROM V1:
   just read response.text. So the code barely changes.
 """
 
-from openai import OpenAI
-from app.config import settings
 import io
+from app.config import settings
+from app.services.clients import openai_client
 
-client = OpenAI(api_key=settings.openai_api_key)
 
-
-async def transcribe_audio(audio_bytes: bytes, filename: str = "recording.m4a") -> str:
+def transcribe_audio(audio_bytes: bytes, filename: str = "recording.m4a") -> str:
     """
     Convert audio bytes to text using OpenAI's recommended transcription model.
 
@@ -26,7 +24,7 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "recording.m4a") 
     audio_file = io.BytesIO(audio_bytes)
     audio_file.name = filename
 
-    response = client.audio.transcriptions.create(
+    response = openai_client.audio.transcriptions.create(
         model=settings.transcription_model,  # "gpt-4o-mini-transcribe"
         file=audio_file,
         # Note: gpt-4o-mini-transcribe only supports "json" or "text" format.

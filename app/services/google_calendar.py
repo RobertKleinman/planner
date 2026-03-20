@@ -16,7 +16,7 @@ from app.services.google_auth import get_calendar_service
 from app.config import settings
 
 
-async def create_calendar_event(
+def create_calendar_event(
     title: str,
     start_time: str,
     end_time: str = None,

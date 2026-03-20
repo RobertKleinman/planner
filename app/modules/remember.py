@@ -8,7 +8,7 @@ from app.models import User, Entry, RememberItem
 from app.schemas import InputResponse
 
 
-async def handle_remember(user, raw_input, intent_data, db, input_type="audio", image_description=None):
+def handle_remember(user, raw_input, intent_data, db, input_type="audio", image_description=None):
     data = intent_data.get("data", {})
     items_data = data.get("items", [])
 

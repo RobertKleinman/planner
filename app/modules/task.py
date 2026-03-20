@@ -5,25 +5,24 @@ modules/task.py — Task Module
 import json
 import logging
 from datetime import datetime, timezone
-from anthropic import Anthropic
 from sqlalchemy.orm import Session
 from app.models import User, Entry, Task
 from app.schemas import InputResponse
 from app.config import settings
+from app.services.clients import anthropic_client
 
 logger = logging.getLogger("planner.task")
-client = Anthropic(api_key=settings.anthropic_api_key)
 
 
-async def handle_task(user, raw_input, intent_data, db, input_type="audio", image_description=None):
+def handle_task(user, raw_input, intent_data, db, input_type="audio", image_description=None):
     data = intent_data.get("data", {})
     action = data.get("action", "create")
     if action == "complete":
-        return await _complete_tasks(user, raw_input, intent_data, db, input_type)
-    return await _create_tasks(user, raw_input, intent_data, db, input_type, image_description)
+        return _complete_tasks(user, raw_input, intent_data, db, input_type)
+    return _create_tasks(user, raw_input, intent_data, db, input_type, image_description)
 
 
-async def _create_tasks(user, raw_input, intent_data, db, input_type, image_description=None):
+def _create_tasks(user, raw_input, intent_data, db, input_type, image_description=None):
     data = intent_data.get("data", {})
     tasks_data = data.get("tasks", [])
     default_group = data.get("group", "General")
@@ -66,7 +65,6 @@ async def _create_tasks(user, raw_input, intent_data, db, input_type, image_desc
         if group not in existing_groups:
             existing_groups.append(group)
 
-    # Flush to get entry IDs, then create all tasks
     db.flush()
     for info in pending:
         if first_entry_id is None:
@@ -86,9 +84,9 @@ async def _create_tasks(user, raw_input, intent_data, db, input_type, image_desc
     return InputResponse(spoken_response=intent_data.get("spoken_response", response), entry_id=first_entry_id or 0, module="task")
 
 
-async def _match_tasks_with_llm(raw_input, open_tasks):
+def _match_tasks_with_llm(raw_input, open_tasks):
     task_list = "\n".join(f"  ID {t.id}: {t.description} [{t.group}]" for t in open_tasks)
-    response = client.messages.create(
+    response = anthropic_client.messages.create(
         model=settings.intent_model, max_tokens=512,
         system="You are a task matching assistant. Given what the user said and their open tasks, determine which tasks they completed. Respond with ONLY valid JSON — no markdown, no backticks.",
         messages=[{"role": "user", "content": f'The user said: "{raw_input}"\n\nTheir open tasks are:\n{task_list}\n\nWhich tasks did they complete? Return: {{"matched_ids": [list of IDs], "explanation": "reason"}}\n\nRules:\n- Be generous with matching.\n- If unsure but reasonable, include it.\n- If nothing matches, return empty list.\n- Only return IDs from the list above.'}],
@@ -101,12 +99,12 @@ async def _match_tasks_with_llm(raw_input, open_tasks):
         return []
 
 
-async def _complete_tasks(user, raw_input, intent_data, db, input_type):
+def _complete_tasks(user, raw_input, intent_data, db, input_type):
     open_tasks = db.query(Task).join(Entry).filter(Entry.user_id == user.id, Entry.deleted_at.is_(None), Task.status == "open").all()
     matched = []
 
     if open_tasks:
-        matched_ids = await _match_tasks_with_llm(raw_input, open_tasks)
+        matched_ids = _match_tasks_with_llm(raw_input, open_tasks)
         for task in open_tasks:
             if task.id in matched_ids:
                 task.status = "done"

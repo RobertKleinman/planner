@@ -19,7 +19,7 @@ from app.services.sms import send_sms
 from app.config import settings
 
 
-async def handle_calendar(
+def handle_calendar(
     user: User,
     raw_input: str,
     intent_data: dict,
@@ -45,11 +45,10 @@ async def handle_calendar(
         module_data=json.dumps(data),
     )
     db.add(entry)
-    db.commit()
-    db.refresh(entry)
+    db.flush()  # get entry.id without committing
 
     # --- Create in Google Calendar ---
-    google_event = await create_calendar_event(
+    google_event = create_calendar_event(  # already sync — Google API call
         title=event_title,
         start_time=start_time,
         end_time=end_time,
@@ -68,7 +67,7 @@ async def handle_calendar(
         location=location,
     )
     db.add(cal_event)
-    db.commit()
+    db.flush()  # get cal_event.id without committing
 
     # --- Notify contacts via SMS ---
     contacts = db.query(NotificationContact).filter(
@@ -84,7 +83,6 @@ async def handle_calendar(
         if contact.notify_mode == "always":
             should_notify = True
         elif contact.notify_mode == "mentioned":
-            # Check if contact's name appears in the voice input
             name_parts = contact.name.lower().split()
             should_notify = any(part in raw_lower for part in name_parts)
 
@@ -92,13 +90,13 @@ async def handle_calendar(
             message = f"\U0001f4c5 New event: {event_title}\n\U0001f550 {start_time or 'TBD'}"
             if location:
                 message += f"\n\U0001f4cd {location}"
-            sent = await send_sms(contact.phone, message)
+            sent = send_sms(contact.phone, message)
             if sent:
                 sms_sent_to.append(contact.name)
 
     cal_event.sms_sent = len(sms_sent_to) > 0
     cal_event.attendee_email = None
-    db.commit()
+    db.commit()  # single commit for the whole transaction
 
     # --- Build response ---
     response_parts = [intent_data.get("spoken_response", f"Created: {event_title}")]

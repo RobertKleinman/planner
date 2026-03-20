@@ -14,21 +14,19 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc, and_, or_
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from collections import defaultdict
 import json
 import logging
 
 from app.database import get_db
 from app.auth import hash_api_key
-from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, NotificationContact
+from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, NotificationContact, MemoTopic, MemoTopicEntry
 from app.services.google_auth import get_calendar_service
-from app.services.intent import classify_intent
 from app.modules.memo import handle_memo
-from app.modules.calendar import handle_calendar
-from app.modules.task import handle_task
-from app.modules.remember import handle_remember
-from app.modules.journal import handle_journal
+from app.services import assistant as assistant_service
 from app.services.google_calendar import create_calendar_event as create_gcal_event
+from app.config import settings
 
 logger = logging.getLogger("planner.dashboard")
 
@@ -368,6 +366,78 @@ async def edit_journal(entry_id: int, request: Request, db: Session = Depends(ge
     return JSONResponse(content={"ok": True})
 
 
+# ─── CRUD: Memo Topics ───────────────────────────────────
+
+@router.post("/dashboard/api/memo-topics")
+async def add_memo_topic(request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "Topic name required"})
+
+    # Check for duplicate
+    existing = db.query(MemoTopic).filter(MemoTopic.user_id == user.id, MemoTopic.name == name).first()
+    if existing:
+        return JSONResponse(status_code=400, content={"error": "Topic already exists"})
+
+    topic = MemoTopic(
+        user_id=user.id,
+        name=name,
+        description=body.get("description", "").strip() or None,
+    )
+    db.add(topic)
+    db.commit()
+    db.refresh(topic)
+    logger.info(f"Memo topic created: '{name}' by user {user.id}")
+    return JSONResponse(content={"ok": True, "id": topic.id})
+
+
+@router.put("/dashboard/api/memo-topics/{topic_id}")
+async def edit_memo_topic(topic_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+
+    topic = db.query(MemoTopic).filter(MemoTopic.id == topic_id, MemoTopic.user_id == user.id).first()
+    if not topic:
+        return JSONResponse(status_code=404, content={"error": "Topic not found"})
+
+    body = await request.json()
+    if "name" in body:
+        name = body["name"].strip()
+        if name:
+            topic.name = name
+    if "description" in body:
+        topic.description = body["description"].strip() or None
+    if "is_active" in body:
+        topic.is_active = bool(body["is_active"])
+
+    db.commit()
+    logger.info(f"Memo topic {topic_id} updated by user {user.id}")
+    return JSONResponse(content={"ok": True})
+
+
+@router.delete("/dashboard/api/memo-topics/{topic_id}")
+async def delete_memo_topic(topic_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+
+    topic = db.query(MemoTopic).filter(MemoTopic.id == topic_id, MemoTopic.user_id == user.id).first()
+    if not topic:
+        return JSONResponse(status_code=404, content={"error": "Topic not found"})
+
+    # cascade deletes linked entries via relationship
+    db.delete(topic)
+    db.commit()
+    logger.info(f"Memo topic {topic_id} deleted by user {user.id}")
+    return JSONResponse(content={"ok": True})
+
+
 # ─── CRUD: Calendar ───────────────────────────────────────
 
 @router.post("/dashboard/api/calendar")
@@ -381,15 +451,16 @@ async def add_calendar(request: Request, db: Session = Depends(get_db)):
     if not title:
         return JSONResponse(status_code=400, content={"error": "Title required"})
 
+    local_tz = ZoneInfo(settings.timezone)
     try:
         start_str = body.get("date", "") + "T" + body.get("time", "09:00")
-        start_time = datetime.fromisoformat(start_str).replace(tzinfo=timezone.utc)
+        start_time = datetime.fromisoformat(start_str).replace(tzinfo=local_tz)
     except (ValueError, TypeError):
         return JSONResponse(status_code=400, content={"error": "Invalid date/time format"})
 
     end_str = body.get("date", "") + "T" + body.get("end_time", "10:00")
     try:
-        end_time = datetime.fromisoformat(end_str).replace(tzinfo=timezone.utc)
+        end_time = datetime.fromisoformat(end_str).replace(tzinfo=local_tz)
     except (ValueError, TypeError):
         end_time = start_time + timedelta(hours=1)
 
@@ -408,7 +479,7 @@ async def add_calendar(request: Request, db: Session = Depends(get_db)):
 
     # Try to create in Google Calendar if connected
     try:
-        gcal_event = await create_gcal_event(
+        gcal_event = create_gcal_event(
             title=title,
             start_time=start_time.isoformat(),
             end_time=end_time.isoformat(),
@@ -496,13 +567,8 @@ async def search_entries(request: Request, db: Session = Depends(get_db)):
 
 # ─── Quick Capture ────────────────────────────────────────
 
-MODULE_HANDLERS = {
-    "memo": handle_memo, "diary": handle_memo, "screenshot_note": handle_memo,
-    "expense": handle_memo, "food": handle_memo, "mood": handle_memo,
-    "idea": handle_memo, "gym": handle_memo, "work": handle_memo,
-    "calendar": handle_calendar, "task": handle_task,
-    "remember": handle_remember, "journal": handle_journal,
-}
+
+
 
 @router.post("/dashboard/api/quick-capture")
 async def quick_capture(request: Request, db: Session = Depends(get_db)):
@@ -516,29 +582,20 @@ async def quick_capture(request: Request, db: Session = Depends(get_db)):
         return JSONResponse(status_code=400, content={"error": "Text required"})
 
     try:
-        # Classify the intent using the same pipeline as voice input
-        intents = await classify_intent(transcript=text)
-        logger.info(f"Quick capture: '{text[:60]}' -> {len(intents)} intent(s)")
-
-        responses = []
-        for intent_data in intents:
-            module_name = intent_data.get("module", "memo")
-            handler = MODULE_HANDLERS.get(module_name, handle_memo)
-            try:
-                response = await handler(
-                    user=user, raw_input=text,
-                    intent_data=intent_data, db=db,
-                    input_type="text", image_description=None,
-                )
-                responses.append(response.spoken_response)
-            except Exception as e:
-                logger.error(f"Quick capture handler error ({module_name}): {e}")
-                responses.append(f"Error processing {module_name}")
+        from uuid import uuid4
+        result = assistant_service.run(
+            user=user,
+            message_text=text,
+            db=db,
+            session_id=f"api:{uuid4()}",
+            input_type="text",
+        )
+        logger.info(f"Quick capture: '{text[:60]}' -> modules: {result.modules_used}")
 
         return JSONResponse(content={
             "ok": True,
-            "spoken_response": " ".join(responses),
-            "module": intents[0].get("module", "memo") if intents else "memo",
+            "spoken_response": result.text,
+            "module": result.modules_used[0] if result.modules_used else "memo",
         })
     except Exception as e:
         logger.error(f"Quick capture error: {e}")
@@ -602,8 +659,10 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     # Auto-purge old trash
     _purge_old_trash(db, user)
 
+    local_tz = ZoneInfo(settings.timezone)
     now = datetime.now(timezone.utc)
-    today_start = datetime.combine(now.date(), datetime.min.time()).replace(tzinfo=timezone.utc)
+    now_local = now.astimezone(local_tz)
+    today_start = datetime.combine(now_local.date(), datetime.min.time(), tzinfo=local_tz)
     today_end = today_start + timedelta(days=1)
 
     # Today's data
@@ -626,7 +685,8 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
 
     today_journal = db.query(JournalEntry).join(Entry).filter(
         Entry.user_id == user.id, _not_deleted(),
-        JournalEntry.date == now.date()
+        JournalEntry.date >= today_start,
+        JournalEntry.date < today_end
     ).order_by(JournalEntry.created_at.desc()).all()
 
     # Active items (not deleted)
@@ -643,6 +703,22 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
 
     # Notification contacts
     contacts = db.query(NotificationContact).filter(NotificationContact.user_id == user.id).order_by(NotificationContact.name).all()
+
+    # Memo topics with linked entry counts
+    memo_topics_list = db.query(MemoTopic).filter(MemoTopic.user_id == user.id).order_by(MemoTopic.name).all()
+    memo_topic_data = []
+    for mt in memo_topics_list:
+        linked = db.query(MemoTopicEntry, Entry).join(Entry).filter(
+            MemoTopicEntry.memo_topic_id == mt.id,
+            Entry.deleted_at.is_(None)
+        ).order_by(MemoTopicEntry.created_at.desc()).limit(20).all()
+        memo_topic_data.append({"topic": mt, "entries": linked})
+
+    # IDs of memos already linked to a topic (for "uncategorized" section)
+    linked_entry_ids = set()
+    for mtd in memo_topic_data:
+        for mte, entry in mtd["entries"]:
+            linked_entry_ids.add(entry.id)
 
     # Stats
     total_open = len(open_tasks)
@@ -962,17 +1038,46 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
             topics_html += f'<div class="topic-row"><div class="topic-name">{_e(tag)}</div><div class="topic-meta"><span class="tag">{count} entries</span></div></div>'
         topics_html += '</div>'
 
-    # ── Memos ──
+    # ── Memos (topic-grouped view) ──
+    module_icons = {"journal": "&#128214;", "task": "&#9745;", "calendar": "&#128197;", "remember": "&#128161;", "memo": "&#128221;"}
+
     memos_html = ""
-    if memos:
-        for m in memos:
+    # Render each memo topic with its linked entries
+    for mtd in memo_topic_data:
+        mt = mtd["topic"]
+        entries = mtd["entries"]
+        active_class = "" if mt.is_active else " style='opacity:0.5'"
+        status_badge = "" if mt.is_active else ' <span class="tag" style="background:rgba(220,38,38,.2);color:#f87171;">paused</span>'
+        memos_html += f'''<div class="card"{active_class}>
+            <div class="card-title"><span>{_e(mt.name)}{status_badge}</span><span class="tag">{len(entries)} entries</span></div>'''
+        if mt.description:
+            memos_html += f'<div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">{_e(mt.description)}</div>'
+        if entries:
+            for mte, entry in entries:
+                icon = module_icons.get(entry.module, "&#128221;")
+                excerpt = _e(mte.excerpt or entry.processed_content or entry.title or "")[:120]
+                memos_html += f'''<div class="item" id="entry-{entry.id}">
+                    <div class="memo-row"><div><span style="margin-right:6px">{icon}</span><span class="memo-body">{excerpt}</span></div><button class="del-btn" onclick="trashItem({entry.id})" title="Move to trash">&#128465;</button></div>
+                    <div class="ts"><span class="tag" style="font-size:10px">{entry.module}</span> {_fmt(entry.created_at)}</div>
+                </div>'''
+        else:
+            memos_html += '<div class="empty" style="padding:12px">No entries matched yet. Start adding inputs that relate to this topic.</div>'
+        memos_html += '</div>'
+
+    # Uncategorized memos (not linked to any topic)
+    uncategorized = [m for m in memos if m.id not in linked_entry_ids]
+    if uncategorized:
+        memos_html += '<div class="card"><div class="card-title">Uncategorized Memos</div>'
+        for m in uncategorized:
             c = _e((m.processed_content or m.raw_transcript or "")[:250])
             memos_html += f'''<div class="item" id="entry-{m.id}">
                 <div class="memo-row"><div><div class="memo-title">{_e(m.title or "Memo")}</div><div class="memo-body">{c}</div></div><button class="del-btn" onclick="trashItem({m.id})" title="Move to trash">&#128465;</button></div>
                 <div class="ts">{_fmt(m.created_at)}</div>
             </div>'''
-    else:
-        memos_html = '<div class="empty-state"><div class="empty-icon">&#128221;</div><div>No memos yet</div></div>'
+        memos_html += '</div>'
+
+    if not memo_topic_data and not memos:
+        memos_html = '<div class="empty-state"><div class="empty-icon">&#128221;</div><div>No memos yet. Create memo topics in Settings to organize your inputs by theme.</div></div>'
 
     # ── Trash ──
     trash_count = len(trashed)
@@ -1017,6 +1122,29 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
             </div>'''
     else:
         contacts_html = '<div class="empty">No contacts yet. Add someone to receive calendar SMS notifications.</div>'
+
+    # ── Memo Topics Settings ──
+    memo_topics_html = ""
+    for mt in memo_topics_list:
+        entry_count = len([mtd for mtd in memo_topic_data if mtd["topic"].id == mt.id and mtd["entries"]])
+        count = sum(len(mtd["entries"]) for mtd in memo_topic_data if mtd["topic"].id == mt.id)
+        active_toggle = "checked" if mt.is_active else ""
+        desc = f'<div style="font-size:11px;color:var(--text-muted);margin-top:2px">{_e(mt.description)}</div>' if mt.description else ""
+        memo_topics_html += f'''<div class="item contact-row" id="memo-topic-{mt.id}">
+            <div class="contact-info">
+                <div class="contact-name">{_e(mt.name)}</div>
+                {desc}
+            </div>
+            <div class="contact-actions">
+                <span class="tag">{count} entries</span>
+                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:11px;color:var(--text-dim)">
+                    <input type="checkbox" {active_toggle} onchange="toggleMemoTopic({mt.id}, this.checked)" style="cursor:pointer"> Active
+                </label>
+                <button class="del-btn" onclick="deleteMemoTopic({mt.id})" title="Delete topic">&#128465;</button>
+            </div>
+        </div>'''
+    if not memo_topics_list:
+        memo_topics_html = '<div class="empty">No memo topics yet. Create topics to automatically organize your inputs by theme.</div>'
 
     return f'''<!DOCTYPE html>
 <html lang="en">
@@ -1314,7 +1442,7 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
     </div>
 
     <div id="memos" class="tc">
-        <div class="card"><div class="card-title">Memos</div>{memos_html}</div>
+        {memos_html}
     </div>
 
     <div id="trash" class="tc">
@@ -1346,6 +1474,21 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
                 </div>
             </div>
             {contacts_html}
+        </div>
+        <div class="card" style="margin-top:16px">
+            <div class="card-title"><span>Memo Topics</span><button class="add-btn" onclick="toggleForm('memo-topic-form')">+ Add topic</button></div>
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px;line-height:1.5">
+                Define topics you care about. When you speak or type, the AI will automatically detect if your input relates to any of these topics and organize it in the Memos tab.
+            </div>
+            <div class="add-form" id="memo-topic-form">
+                <input type="text" id="memo-topic-name" placeholder="Topic name (e.g. House Renovation)" onkeydown="if(event.key==='Enter')document.getElementById('memo-topic-desc').focus()">
+                <textarea id="memo-topic-desc" placeholder="Optional description — helps the AI understand what to match (e.g. Anything about home improvement, contractors, materials)" style="min-height:60px;resize:vertical"></textarea>
+                <div class="form-actions">
+                    <button class="btn btn-ghost" onclick="toggleForm('memo-topic-form')">Cancel</button>
+                    <button class="btn btn-primary" onclick="addMemoTopic()">Create Topic</button>
+                </div>
+            </div>
+            {memo_topics_html}
         </div>
     </div>
 </div>
@@ -1478,6 +1621,16 @@ async function addContact(){{
 }}
 async function updateContactMode(id,mode){{await api('POST','/dashboard/api/contacts/'+id+'/mode',{{notify_mode:mode}})}}
 async function deleteContact(id){{if(!confirm('Remove this contact?'))return;await api('DELETE','/dashboard/api/contacts/'+id);fadeOut('contact-'+id)}}
+async function addMemoTopic(){{
+    const name=document.getElementById('memo-topic-name').value.trim();
+    if(!name)return;
+    const desc=document.getElementById('memo-topic-desc').value.trim();
+    const r=await api('POST','/dashboard/api/memo-topics',{{name:name,description:desc}});
+    if(r.error){{alert(r.error);return}}
+    location.reload();
+}}
+async function toggleMemoTopic(id,active){{await api('PUT','/dashboard/api/memo-topics/'+id,{{is_active:active}})}}
+async function deleteMemoTopic(id){{if(!confirm('Delete this memo topic? Linked entries will be kept but unlinked.'))return;await api('DELETE','/dashboard/api/memo-topics/'+id);fadeOut('memo-topic-'+id);setTimeout(()=>location.reload(),400)}}
 function _esc(s){{return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}}
 </script>
 </body>

@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # --- Email ---
     digest_recipient_email: str = Field(default="")
 
+    # --- Telegram ---
+    telegram_bot_token: str = Field(default="")
+    telegram_webhook_secret: str = Field(default="")
+    app_base_url: str = Field(default="")
+
     # --- Server ---
     environment: str = Field(default="development")
     timezone: str = Field(default="America/Toronto")
