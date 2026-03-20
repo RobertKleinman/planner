@@ -730,7 +730,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     task_groups = sorted(set(t.group for t in all_tasks)) if all_tasks else ["General", "Errands", "House", "Work", "Health", "Personal", "Dogs"]
     remember_cats = sorted(set(r.category for r in remember_items)) if remember_items else ["General", "People", "Passwords", "Home", "Work", "Reference"]
 
-    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal)
+    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data, memo_topics_list, linked_entry_ids)
     return HTMLResponse(content=html)
 
 # ─── Helpers ──────────────────────────────────────────────
@@ -792,7 +792,11 @@ def _days_left(deleted_at):
 
 # ─── Render ──────────────────────────────────────────────
 
-def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal):
+def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data=None, memo_topics_list=None, linked_entry_ids=None):
+
+    memo_topic_data = memo_topic_data or []
+    memo_topics_list = memo_topics_list or []
+    linked_entry_ids = linked_entry_ids or set()
 
     # ── Stats bar ──
     stats_html = f'''<div class="stats-bar">
