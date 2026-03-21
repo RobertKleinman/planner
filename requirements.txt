@@ -12,7 +12,7 @@ pydantic==2.9.0
 pydantic-settings==2.5.0
 
 # AI / LLM
-openai==1.51.0                 # Transcription (gpt-4o-mini-transcribe)
+openai>=1.75.0                 # Transcription + image generation (gpt-image-1)
 anthropic==0.37.0              # Intent classification + vision (Claude)
 
 # Google APIs
