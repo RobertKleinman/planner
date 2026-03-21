@@ -40,7 +40,7 @@ def generate_zeph_image(scene_description: str, quality: str = "medium") -> byte
 
     try:
         response = openai_client.images.generate(
-            model="gpt-image-1",
+            model="gpt-image-1-mini",
             prompt=prompt,
             n=1,
             size="1024x1024",
