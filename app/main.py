@@ -92,27 +92,26 @@ async def lifespan(app: FastAPI):
             from aiogram import Bot
             bot = Bot(token=settings.telegram_bot_token)
             webhook_url = f"{settings.app_base_url.rstrip('/')}/telegram/webhook"
+            # Only use secret if it contains valid characters (alphanumeric, -, _)
+            secret = settings.telegram_webhook_secret or ""
+            import re
+            if secret and not re.match(r'^[A-Za-z0-9_-]+$', secret):
+                logger.warning(f"Telegram webhook secret contains invalid characters, skipping secret")
+                secret = ""
             await bot.set_webhook(
                 url=webhook_url,
-                secret_token=settings.telegram_webhook_secret or None,
+                secret_token=secret or None,
             )
-            logger.info(f"Telegram webhook set: {webhook_url}")
+            logger.info(f"Telegram webhook set: {webhook_url} (secret: {'yes' if secret else 'no'})")
             await bot.session.close()
         except Exception as e:
-            logger.warning(f"Failed to set Telegram webhook: {e}")
+            logger.error(f"Failed to set Telegram webhook: {e}", exc_info=True)
 
     yield
 
-    # Clean up Telegram webhook on shutdown
-    if settings.telegram_bot_token:
-        try:
-            from aiogram import Bot
-            bot = Bot(token=settings.telegram_bot_token)
-            await bot.delete_webhook()
-            await bot.session.close()
-            logger.info("Telegram webhook deleted")
-        except Exception as e:
-            logger.warning(f"Failed to delete Telegram webhook: {e}")
+    # Note: we intentionally do NOT delete the webhook on shutdown.
+    # The webhook stays registered so Telegram queues messages during
+    # redeploys. The startup code re-registers it anyway.
 
     logger.info("Server shutting down")
 
