@@ -204,6 +204,48 @@ def debug_google():
     return result
 
 
+@app.post("/admin/notification-contacts", tags=["system"])
+def add_notification_contact(
+    name: str = Body(...),
+    phone: str = Body(...),
+    notify_mode: str = Body("always"),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Add a notification contact for calendar event SMS alerts."""
+    existing = db.query(models.NotificationContact).filter(
+        models.NotificationContact.user_id == user.id,
+        models.NotificationContact.phone == phone,
+    ).first()
+    if existing:
+        return {"message": f"Contact {existing.name} already exists with this phone"}
+
+    contact = models.NotificationContact(
+        user_id=user.id,
+        name=name,
+        phone=phone,
+        notify_mode=notify_mode,
+    )
+    db.add(contact)
+    db.commit()
+    return {"message": f"Contact '{name}' added", "phone": phone, "notify_mode": notify_mode}
+
+
+@app.get("/admin/notification-contacts", tags=["system"])
+def list_notification_contacts(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """List all notification contacts."""
+    contacts = db.query(models.NotificationContact).filter(
+        models.NotificationContact.user_id == user.id,
+    ).all()
+    return [
+        {"id": c.id, "name": c.name, "phone": c.phone, "notify_mode": c.notify_mode}
+        for c in contacts
+    ]
+
+
 @app.post("/setup-user", tags=["system"])
 def setup_user(db: Session = Depends(get_db)):
     """One-time setup for the primary user using PLANNER_API_KEY from environment."""
