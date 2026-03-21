@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # --- Email ---
     digest_recipient_email: str = Field(default="")
 
+    # --- xAI (Grok image generation) ---
+    xai_api_key: str = Field(default="")
+
     # --- Telegram ---
     telegram_bot_token: str = Field(default="")
     telegram_webhook_secret: str = Field(default="")
