@@ -155,55 +155,6 @@ def health_check():
     )
 
 
-@app.get("/debug/google", tags=["system"])
-def debug_google():
-    """Temporary debug endpoint for Google auth issues."""
-    import os, tempfile
-    result = {}
-    result["has_token_env"] = bool(os.environ.get("GOOGLE_TOKEN_JSON"))
-    result["has_creds_env"] = bool(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
-    result["app_base_url"] = settings.app_base_url or "(empty)"
-    result["telegram_webhook_secret_len"] = len(settings.telegram_webhook_secret)
-
-    # Check if either JSON env var is valid
-    import json as _json
-    token_raw = os.environ.get("GOOGLE_TOKEN_JSON", "")
-    creds_raw = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
-    try:
-        _json.loads(token_raw)
-        result["token_json_valid"] = True
-    except Exception as e:
-        result["token_json_valid"] = False
-        result["token_json_error"] = str(e)
-        result["token_json_around_178"] = repr(token_raw[170:190]) if len(token_raw) > 170 else repr(token_raw)
-    try:
-        _json.loads(creds_raw)
-        result["creds_json_valid"] = True
-    except Exception as e:
-        result["creds_json_valid"] = False
-        result["creds_json_error"] = str(e)
-        result["creds_json_around_178"] = repr(creds_raw[170:190]) if len(creds_raw) > 170 else repr(creds_raw)
-
-    try:
-        from app.services.google_auth import _ensure_token_file, get_google_credentials
-        token_path = _ensure_token_file()
-        result["token_path"] = token_path
-        result["token_file_exists"] = os.path.exists(token_path)
-
-        creds = get_google_credentials()
-        if creds:
-            result["creds_valid"] = creds.valid
-            result["creds_expired"] = creds.expired
-            result["has_refresh_token"] = bool(creds.refresh_token)
-            result["expiry"] = str(creds.expiry) if creds.expiry else None
-        else:
-            result["creds"] = None
-    except Exception as e:
-        result["error"] = str(e)
-
-    return result
-
-
 @app.post("/admin/notification-contacts", tags=["system"])
 def add_notification_contact(
     name: str = Body(...),
