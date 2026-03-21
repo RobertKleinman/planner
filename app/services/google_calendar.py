@@ -10,7 +10,7 @@ Google Calendar — your iPhone, Mac, browser, Johnny's phone if he's
 an attendee. No Shortcuts action blocks needed.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from app.services.google_auth import get_calendar_service
 from app.config import settings
@@ -48,6 +48,11 @@ def create_calendar_event(
 
     tz = timezone or settings.timezone
 
+    # Default to 1 hour if no end time provided
+    if not end_time:
+        start_dt = datetime.fromisoformat(start_time)
+        end_time = (start_dt + timedelta(hours=1)).isoformat()
+
     event_body = {
         "summary": title,
         "start": {
@@ -55,7 +60,7 @@ def create_calendar_event(
             "timeZone": tz,
         },
         "end": {
-            "dateTime": end_time or start_time,  # Fallback; caller should provide
+            "dateTime": end_time,
             "timeZone": tz,
         },
     }

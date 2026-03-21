@@ -63,7 +63,9 @@ def handle_calendar(
         google_event_id=google_event.get("id") if google_event else None,
         title=event_title,
         start_time=datetime.fromisoformat(start_time) if start_time else datetime.now(),
-        end_time=datetime.fromisoformat(end_time) if end_time else None,
+        end_time=datetime.fromisoformat(end_time) if end_time else (
+            datetime.fromisoformat(start_time) + timedelta(hours=1) if start_time else None
+        ),
         location=location,
     )
     db.add(cal_event)

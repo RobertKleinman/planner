@@ -21,7 +21,7 @@ from app.services.tools import TOOLS, execute_tool
 
 logger = logging.getLogger("planner.assistant")
 
-MAX_HISTORY = 20  # last N messages loaded for session context
+MAX_HISTORY = 50  # last N messages loaded for session context
 MAX_TOOL_ROUNDS = 10  # safety limit on tool loop iterations
 
 
@@ -181,10 +181,9 @@ def run(
     # Build the new user message
     user_content = _build_user_content(message_text, image_bytes, image_media_type)
 
-    # For persistent sessions, store user message (text-only version for storage)
+    # For persistent sessions, store user message (text version for storage — images excluded to save space)
     if is_persistent:
-        storage_content = message_text or "(image)"
-        _persist_message(db, user, session_id, "user", storage_content)
+        _persist_message(db, user, session_id, "user", message_text or "(image)")
 
     # Build messages array for Claude
     messages = history + [{"role": "user", "content": user_content}]
@@ -254,6 +253,11 @@ def run(
         # Append assistant message (with tool_use blocks) and user message (with tool_results)
         messages.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "user", "content": tool_results})
+
+        # Persist tool interactions so conversation memory includes what the bot *did*
+        if is_persistent:
+            _persist_message(db, user, session_id, "assistant", assistant_content)
+            _persist_message(db, user, session_id, "user", tool_results)
     else:
         # Hit max rounds — extract whatever text we have
         final_text = "I got a bit tangled up. Could you try that again?"

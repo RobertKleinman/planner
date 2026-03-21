@@ -142,17 +142,26 @@ async def telegram_webhook(request: Request):
             await bot.send_message(chat_id=chat_id, text="I didn't get anything there. Try again?")
             return JSONResponse(content={"ok": True})
 
-        # Run assistant in a thread to avoid blocking the event loop
-        result = await asyncio.to_thread(
-            assistant_service.run,
-            user=user,
-            message_text=transcript,
-            image_bytes=image_bytes,
-            image_media_type=image_media_type,
-            db=db,
-            session_id=session_id,
-            input_type=input_type,
-        )
+        # Run assistant in a separate thread with its own DB session
+        # (SQLAlchemy sessions are not thread-safe)
+        def _run_assistant():
+            thread_db = SessionLocal()
+            try:
+                # Re-fetch user in this thread's session
+                thread_user = thread_db.query(User).filter(User.id == user.id).first()
+                return assistant_service.run(
+                    user=thread_user,
+                    message_text=transcript,
+                    image_bytes=image_bytes,
+                    image_media_type=image_media_type,
+                    db=thread_db,
+                    session_id=session_id,
+                    input_type=input_type,
+                )
+            finally:
+                thread_db.close()
+
+        result = await asyncio.to_thread(_run_assistant)
         reply = result.text
 
         if reply:
