@@ -157,6 +157,21 @@ class ConversationMessage(Base):
     user = relationship("User")
 
 
+class Reminder(Base):
+    __tablename__ = "reminders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    message = Column(Text, nullable=False)
+    remind_at = Column(DateTime, nullable=False, index=True)  # UTC
+    recurring = Column(String, nullable=True)  # null=one-time, "daily", "weekly", "weekdays"
+    sent = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
+
+
 class NotificationContact(Base):
     __tablename__ = "notification_contacts"
 

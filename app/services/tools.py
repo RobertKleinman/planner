@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from app.models import (
-    User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, MemoTopic,
+    User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, MemoTopic, Reminder,
 )
 from app.config import settings
 from app.modules.memo import handle_memo
@@ -184,6 +184,43 @@ TOOLS = [
             },
         },
     },
+    # ── Reminder tools ──
+    {
+        "name": "create_reminder",
+        "description": "Set a reminder to ping the user at a specific time. Use when they say 'remind me', 'don't let me forget', 'ping me about', etc. Also PROACTIVELY SUGGEST reminders when the user mentions something time-sensitive — ask them first before creating.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "What to remind them about"},
+                "remind_at": {"type": "string", "description": "ISO 8601 datetime for when to send the reminder"},
+                "recurring": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "weekdays"],
+                    "description": "If this repeats. Omit for one-time reminders.",
+                },
+            },
+            "required": ["message", "remind_at"],
+        },
+    },
+    {
+        "name": "get_reminders",
+        "description": "List the user's active reminders. Use when they ask what reminders they have set.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "delete_reminder",
+        "description": "Cancel/delete a reminder. Use when the user says to cancel or remove a reminder.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "integer", "description": "ID of the reminder to delete"},
+            },
+            "required": ["reminder_id"],
+        },
+    },
     # ── Zeph tools ──
     {
         "name": "generate_self_image",
@@ -234,6 +271,12 @@ def execute_tool(
             return _exec_search(tool_input, user, db)
         elif tool_name == "get_remember_items":
             return _exec_get_remember_items(tool_input, user, db)
+        elif tool_name == "create_reminder":
+            return _exec_create_reminder(tool_input, user, db)
+        elif tool_name == "get_reminders":
+            return _exec_get_reminders(user, db)
+        elif tool_name == "delete_reminder":
+            return _exec_delete_reminder(tool_input, user, db)
         elif tool_name == "generate_self_image":
             return _exec_generate_self_image(tool_input)
         else:
@@ -508,6 +551,79 @@ def _exec_get_remember_items(tool_input, user, db):
         lines.append(line)
 
     return ToolResult(content=f"{len(items)} remembered item(s):\n" + "\n".join(lines), module="remember")
+
+
+# ─── Reminder Tool Executors ──────────────────────────────────
+
+def _exec_create_reminder(tool_input, user, db):
+    from datetime import datetime as dt
+
+    message = tool_input["message"]
+    remind_at_str = tool_input["remind_at"]
+    recurring = tool_input.get("recurring")
+
+    remind_at = dt.fromisoformat(remind_at_str)
+    # Convert to UTC if timezone-aware
+    if remind_at.tzinfo:
+        remind_at = remind_at.astimezone(timezone).replace(tzinfo=None)
+
+    reminder = Reminder(
+        user_id=user.id,
+        message=message,
+        remind_at=remind_at,
+        recurring=recurring,
+    )
+    db.add(reminder)
+    db.commit()
+
+    recur_text = f" (repeats {recurring})" if recurring else ""
+    tz = ZoneInfo(settings.timezone)
+    local_time = remind_at.replace(tzinfo=timezone).astimezone(tz)
+
+    return ToolResult(
+        content=f"Reminder set (ID: {reminder.id}): '{message}' at {local_time.strftime('%a %b %d, %I:%M %p')}{recur_text}",
+        module="reminder",
+    )
+
+
+def _exec_get_reminders(user, db):
+    reminders = (
+        db.query(Reminder)
+        .filter(
+            Reminder.user_id == user.id,
+            Reminder.sent == False,
+        )
+        .order_by(Reminder.remind_at)
+        .limit(30)
+        .all()
+    )
+
+    if not reminders:
+        return ToolResult(content="No active reminders.", module="reminder")
+
+    tz = ZoneInfo(settings.timezone)
+    lines = []
+    for r in reminders:
+        local_time = r.remind_at.replace(tzinfo=timezone).astimezone(tz)
+        recur = f" [{r.recurring}]" if r.recurring else ""
+        lines.append(f"- (ID: {r.id}) {r.message} — {local_time.strftime('%a %b %d, %I:%M %p')}{recur}")
+
+    return ToolResult(content=f"{len(reminders)} reminder(s):\n" + "\n".join(lines), module="reminder")
+
+
+def _exec_delete_reminder(tool_input, user, db):
+    reminder_id = tool_input["reminder_id"]
+    reminder = db.query(Reminder).filter(
+        Reminder.id == reminder_id,
+        Reminder.user_id == user.id,
+    ).first()
+
+    if not reminder:
+        return ToolResult(content=f"Reminder {reminder_id} not found.")
+
+    db.delete(reminder)
+    db.commit()
+    return ToolResult(content=f"Reminder {reminder_id} deleted: '{reminder.message}'", module="reminder")
 
 
 # ─── Zeph Tool Executors ─────────────────────────────────────
