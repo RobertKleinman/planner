@@ -155,6 +155,36 @@ def health_check():
     )
 
 
+@app.get("/debug/google", tags=["system"])
+def debug_google():
+    """Temporary debug endpoint for Google auth issues."""
+    import os, tempfile
+    result = {}
+    result["has_token_env"] = bool(os.environ.get("GOOGLE_TOKEN_JSON"))
+    result["has_creds_env"] = bool(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
+    result["app_base_url"] = settings.app_base_url or "(empty)"
+    result["telegram_webhook_secret_len"] = len(settings.telegram_webhook_secret)
+
+    try:
+        from app.services.google_auth import _ensure_token_file, get_google_credentials
+        token_path = _ensure_token_file()
+        result["token_path"] = token_path
+        result["token_file_exists"] = os.path.exists(token_path)
+
+        creds = get_google_credentials()
+        if creds:
+            result["creds_valid"] = creds.valid
+            result["creds_expired"] = creds.expired
+            result["has_refresh_token"] = bool(creds.refresh_token)
+            result["expiry"] = str(creds.expiry) if creds.expiry else None
+        else:
+            result["creds"] = None
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 @app.post("/setup-user", tags=["system"])
 def setup_user(db: Session = Depends(get_db)):
     """One-time setup for the primary user using PLANNER_API_KEY from environment."""
