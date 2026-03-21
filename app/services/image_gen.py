@@ -25,7 +25,7 @@ ZEPH_CHARACTER = (
 )
 
 
-def generate_zeph_image(scene_description: str, quality: str = "medium") -> bytes | None:
+def generate_zeph_image(scene_description: str, quality: str = "low") -> bytes | None:
     """
     Generate an image of Zeph in a described scene.
 
@@ -40,7 +40,7 @@ def generate_zeph_image(scene_description: str, quality: str = "medium") -> byte
 
     try:
         response = openai_client.images.generate(
-            model="gpt-image-1-mini",
+            model="gpt-image-1",
             prompt=prompt,
             n=1,
             size="1024x1024",
