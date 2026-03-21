@@ -163,9 +163,15 @@ async def telegram_webhook(request: Request):
 
         result = await asyncio.to_thread(_run_assistant)
         reply = result.text
+        bot = _get_bot()
+
+        # Send any generated images
+        for img_bytes in result.images:
+            from aiogram.types import BufferedInputFile
+            photo = BufferedInputFile(img_bytes, filename="zeph.png")
+            await bot.send_photo(chat_id=chat_id, photo=photo)
 
         if reply:
-            bot = _get_bot()
             await bot.send_message(chat_id=chat_id, text=reply)
 
     except Exception as e:

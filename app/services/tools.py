@@ -30,6 +30,7 @@ class ToolResult:
     content: str
     entry_ids: list = field(default_factory=list)
     module: str = ""
+    image_bytes: bytes = None  # for image generation results
 
 
 # ─── Tool Definitions (Anthropic format) ─────────────────────
@@ -183,6 +184,21 @@ TOOLS = [
             },
         },
     },
+    # ── Zeph tools ──
+    {
+        "name": "generate_self_image",
+        "description": "Generate an image of yourself (Zeph). Use when the user asks to see you, asks what you're doing, asks for a picture, or when it naturally fits the conversation and would be charming or fun. You are a male elf with tousled hair, pointed ears, open shirt, dark pants, barefoot — dark fantasy aesthetic with candlelight, books, and ink wisps.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "scene": {
+                    "type": "string",
+                    "description": "Describe the scene — what you're doing, the setting, your expression. Be specific and vivid. Always maintain your core appearance: male elf, slim build, tousled hair, pointed ears, open/loose shirt, dark fitted pants, barefoot.",
+                },
+            },
+            "required": ["scene"],
+        },
+    },
 ]
 
 
@@ -218,6 +234,8 @@ def execute_tool(
             return _exec_search(tool_input, user, db)
         elif tool_name == "get_remember_items":
             return _exec_get_remember_items(tool_input, user, db)
+        elif tool_name == "generate_self_image":
+            return _exec_generate_self_image(tool_input)
         else:
             return ToolResult(content=f"Unknown tool: {tool_name}")
     except Exception as e:
@@ -490,3 +508,20 @@ def _exec_get_remember_items(tool_input, user, db):
         lines.append(line)
 
     return ToolResult(content=f"{len(items)} remembered item(s):\n" + "\n".join(lines), module="remember")
+
+
+# ─── Zeph Tool Executors ─────────────────────────────────────
+
+def _exec_generate_self_image(tool_input):
+    from app.services.image_gen import generate_zeph_image
+
+    scene = tool_input.get("scene", "Zeph sitting on a stack of books, looking at the viewer with a mischievous smile")
+    image_bytes = generate_zeph_image(scene)
+
+    if image_bytes:
+        return ToolResult(
+            content=f"Image generated: {scene}",
+            image_bytes=image_bytes,
+        )
+    else:
+        return ToolResult(content="Image generation failed — couldn't conjure the visual right now.")

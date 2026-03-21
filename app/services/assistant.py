@@ -30,6 +30,7 @@ class AssistantResponse:
     text: str
     entry_ids: list = field(default_factory=list)
     modules_used: list = field(default_factory=list)
+    images: list = field(default_factory=list)  # list of image bytes
 
 
 def _build_system_prompt(user: User, memo_topics: list = None) -> str:
@@ -202,6 +203,7 @@ def run(
     # Tool execution loop
     all_entry_ids = []
     all_modules = []
+    all_images = []
 
     for round_num in range(MAX_TOOL_ROUNDS):
         logger.info(f"Assistant round {round_num + 1} for {user.name} (session: {session_id})")
@@ -254,6 +256,8 @@ def run(
                 all_entry_ids.extend(result.entry_ids)
                 if result.module and result.module not in all_modules:
                     all_modules.append(result.module)
+                if result.image_bytes:
+                    all_images.append(result.image_bytes)
 
                 tool_results.append({
                     "type": "tool_result",
@@ -286,5 +290,6 @@ def run(
     return AssistantResponse(
         text=final_text,
         entry_ids=all_entry_ids,
+        images=all_images,
         modules_used=all_modules,
     )
