@@ -35,9 +35,12 @@ def _ensure_token_file() -> str:
     # Check if token JSON is provided as an environment variable
     token_json = os.environ.get("GOOGLE_TOKEN_JSON")
     if token_json:
+        # Railway UI may inject newlines/spaces into pasted values —
+        # strip them before parsing since they break JSON string values
+        cleaned = token_json.replace("\n", "").replace("\r", "").replace("  ", "")
         path = os.path.join(tempfile.gettempdir(), "token.json")
         with open(path, "w") as f:
-            f.write(token_json)
+            f.write(cleaned)
         return path
 
     # Fall back to local file
@@ -53,9 +56,10 @@ def _ensure_credentials_file() -> str:
     """
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
+        cleaned = creds_json.replace("\n", "").replace("\r", "").replace("  ", "")
         path = os.path.join(tempfile.gettempdir(), "credentials.json")
         with open(path, "w") as f:
-            f.write(creds_json)
+            f.write(cleaned)
         return path
 
     return settings.google_credentials_file
