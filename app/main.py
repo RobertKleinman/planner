@@ -165,6 +165,25 @@ def debug_google():
     result["app_base_url"] = settings.app_base_url or "(empty)"
     result["telegram_webhook_secret_len"] = len(settings.telegram_webhook_secret)
 
+    # Check if either JSON env var is valid
+    import json as _json
+    token_raw = os.environ.get("GOOGLE_TOKEN_JSON", "")
+    creds_raw = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+    try:
+        _json.loads(token_raw)
+        result["token_json_valid"] = True
+    except Exception as e:
+        result["token_json_valid"] = False
+        result["token_json_error"] = str(e)
+        result["token_json_around_178"] = repr(token_raw[170:190]) if len(token_raw) > 170 else repr(token_raw)
+    try:
+        _json.loads(creds_raw)
+        result["creds_json_valid"] = True
+    except Exception as e:
+        result["creds_json_valid"] = False
+        result["creds_json_error"] = str(e)
+        result["creds_json_around_178"] = repr(creds_raw[170:190]) if len(creds_raw) > 170 else repr(creds_raw)
+
     try:
         from app.services.google_auth import _ensure_token_file, get_google_credentials
         token_path = _ensure_token_file()
