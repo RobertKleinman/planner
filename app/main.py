@@ -107,7 +107,28 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to set Telegram webhook: {e}", exc_info=True)
 
+    # Start background reminder checker
+    reminder_task = None
+    if settings.telegram_bot_token:
+        async def _reminder_loop():
+            import asyncio
+            from jobs.send_reminders import send_due_reminders
+            while True:
+                try:
+                    await send_due_reminders()
+                except Exception as e:
+                    logger.error(f"Reminder check failed: {e}", exc_info=True)
+                await asyncio.sleep(300)  # every 5 minutes
+
+        import asyncio
+        reminder_task = asyncio.create_task(_reminder_loop())
+        logger.info("Background reminder checker started (every 5 min)")
+
     yield
+
+    # Clean up background tasks
+    if reminder_task:
+        reminder_task.cancel()
 
     # Note: we intentionally do NOT delete the webhook on shutdown.
     # The webhook stays registered so Telegram queues messages during
