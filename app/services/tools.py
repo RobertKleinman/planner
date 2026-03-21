@@ -516,12 +516,15 @@ def _exec_generate_self_image(tool_input):
     from app.services.image_gen import generate_zeph_image
 
     scene = tool_input.get("scene", "Zeph sitting on a stack of books, looking at the viewer with a mischievous smile")
-    image_bytes = generate_zeph_image(scene)
 
-    if image_bytes:
-        return ToolResult(
-            content=f"Image generated: {scene}",
-            image_bytes=image_bytes,
-        )
-    else:
-        return ToolResult(content="Image generation failed — couldn't conjure the visual right now.")
+    try:
+        image_bytes = generate_zeph_image(scene)
+        if image_bytes:
+            return ToolResult(
+                content=f"Image generated successfully: {scene}",
+                image_bytes=image_bytes,
+            )
+        else:
+            return ToolResult(content="Image generation returned no data. Check logs for details.")
+    except Exception as e:
+        return ToolResult(content=f"Image generation error: {e}")

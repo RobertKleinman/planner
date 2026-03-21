@@ -25,7 +25,7 @@ ZEPH_CHARACTER = (
 )
 
 
-def generate_zeph_image(scene_description: str, quality: str = "low") -> bytes | None:
+def generate_zeph_image(scene_description: str, quality: str = "low") -> bytes:
     """
     Generate an image of Zeph in a described scene.
 
@@ -42,12 +42,11 @@ def generate_zeph_image(scene_description: str, quality: str = "low") -> bytes |
         response = openai_client.images.generate(
             model="gpt-image-1",
             prompt=prompt,
-            n=1,
             size="1024x1024",
             quality=quality,
         )
 
-        # gpt-image-1 returns base64
+        # gpt-image-1 always returns base64
         image_data = response.data[0].b64_json
         image_bytes = base64.b64decode(image_data)
 
@@ -56,4 +55,4 @@ def generate_zeph_image(scene_description: str, quality: str = "low") -> bytes |
 
     except Exception as e:
         logger.error(f"Image generation failed: {e}", exc_info=True)
-        return None
+        raise  # let the caller see the actual error
