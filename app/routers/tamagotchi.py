@@ -143,8 +143,8 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 }
 
 .zeph-sprite {
-    width: 20px;
-    height: 32px;
+    width: 48px;
+    height: 48px;
     background: #6a5acd;
     border-radius: 6px 6px 2px 2px;
     position: relative;
@@ -170,8 +170,8 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 }
 
 .briar-sprite {
-    width: 24px;
-    height: 14px;
+    width: 48px;
+    height: 30px;
     background: #8a7a6a;
     border-radius: 8px 10px 3px 3px;
     position: relative;

@@ -40,65 +40,65 @@ BG_TOLERANCE = 80
 # ─── Sprite Definitions ──────────────────────────────────────
 
 CHARACTER_SPRITES = {
-    # Zeph poses
+    # Zeph poses — generate at 1024x1024, output at 128x128
     "zeph/reading": {
-        "prompt": "pixel art, side view, single male elf character sitting at desk reading a book, pointy ears, tousled dark hair, loose white shirt, dark pants, barefoot, warm candlelight, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 48),
+        "prompt": "pixel art character sprite, male elf sitting reading a large book, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, warm lighting, centered in frame, full body visible, solid bright green background",
+        "size": (128, 128),
     },
     "zeph/writing": {
-        "prompt": "pixel art, side view, single male elf character sitting at desk writing with quill pen, pointy ears, tousled dark hair, loose white shirt, dark pants, barefoot, warm candlelight, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 48),
+        "prompt": "pixel art character sprite, male elf sitting at desk writing with feather quill, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, inkwell nearby, centered in frame, full body visible, solid bright green background",
+        "size": (128, 128),
     },
     "zeph/sleeping": {
-        "prompt": "pixel art, side view, single male elf character sleeping curled up, pointy ears, tousled dark hair, loose white shirt, dark pants, barefoot, peaceful, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 48),
+        "prompt": "pixel art character sprite, male elf sleeping peacefully lying down on side, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, eyes closed, centered in frame, full body visible, solid bright green background",
+        "size": (128, 128),
     },
     "zeph/eating": {
-        "prompt": "pixel art, side view, single male elf character sitting at table eating from a bowl, pointy ears, tousled dark hair, loose white shirt, dark pants, barefoot, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 48),
+        "prompt": "pixel art character sprite, male elf sitting at small table eating from bowl with spoon, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, centered in frame, full body visible, solid bright green background",
+        "size": (128, 128),
     },
     "zeph/magic": {
-        "prompt": "pixel art, side view, single male elf character standing with hands raised casting magic, glowing sparks, pointy ears, tousled dark hair, loose white shirt, dark pants, barefoot, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 48),
+        "prompt": "pixel art character sprite, male elf standing casting magic spell, glowing magical particles around hands, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, magical aura, centered in frame, full body visible, solid bright green background",
+        "size": (128, 128),
     },
     "zeph/walking": {
-        "prompt": "pixel art, side view, single male elf character walking, mid-stride, pointy ears, tousled dark hair, loose white shirt, dark pants, barefoot, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 48),
+        "prompt": "pixel art character sprite, male elf walking mid-stride to the right, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, natural walking pose, centered in frame, full body visible, solid bright green background",
+        "size": (128, 128),
     },
     "zeph/sitting": {
-        "prompt": "pixel art, side view, single male elf character sitting on the ground relaxed, legs crossed, pointy ears, tousled dark hair, loose white shirt, dark pants, barefoot, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 48),
+        "prompt": "pixel art character sprite, male elf sitting cross-legged on ground relaxed, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, peaceful expression, centered in frame, full body visible, solid bright green background",
+        "size": (128, 128),
     },
     # Briar poses
     "briar/sleeping": {
-        "prompt": "pixel art, side view, single large scruffy wolfhound dog sleeping curled up, grey-brown fur, one torn ear, peaceful, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 32),
+        "prompt": "pixel art character sprite, large scruffy wolfhound dog sleeping curled up in a ball, shaggy grey-brown fur, one torn ear, peaceful, centered in frame, solid bright green background",
+        "size": (128, 80),
     },
     "briar/sitting": {
-        "prompt": "pixel art, side view, single large scruffy wolfhound dog sitting upright alert, grey-brown fur, one torn ear, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 32),
+        "prompt": "pixel art character sprite, large scruffy wolfhound dog sitting upright looking alert, shaggy grey-brown fur, one torn ear, tongue slightly out, centered in frame, solid bright green background",
+        "size": (128, 80),
     },
     "briar/following": {
-        "prompt": "pixel art, side view, single large scruffy wolfhound dog walking trotting, grey-brown fur, one torn ear, tail up, solid bright green background, 32x32 sprite style, clean pixel edges, dark fantasy",
-        "size": (48, 32),
+        "prompt": "pixel art character sprite, large scruffy wolfhound dog trotting walking to the right, shaggy grey-brown fur, one torn ear, tail wagging, happy, centered in frame, solid bright green background",
+        "size": (128, 80),
     },
 }
 
 ROOM_SPRITES = {
     "rooms/study": {
-        "prompt": "pixel art, interior scene, dark stone tower study room, wooden desk covered in books and scrolls, melting candles with warm glow, tall bookshelf against wall, arched window showing grey sea and clouds, ink bottles, quill pen, stone walls with cracks, cozy and cluttered, dark fantasy aesthetic, no characters, side view",
+        "prompt": "pixel art game background, dark stone tower study interior, side view platformer style, wooden desk with open books and scrolls, melting candles with warm orange glow, tall bookshelf packed with colorful books, arched stone window showing grey stormy sea, ink bottles and quill pen on desk, cracked stone walls with ivy, cozy cluttered atmosphere, dark fantasy rpg aesthetic, detailed pixel art, no characters, moody warm lighting",
         "size": (320, 240),
     },
     "rooms/kitchen": {
-        "prompt": "pixel art, interior scene, medieval stone tower kitchen, wooden table with plates and bread, stone fireplace with crackling fire, warm orange glow, hanging pots, wooden chair, shelves with jars, stone floor, cozy and simple, dark fantasy aesthetic, no characters, side view",
+        "prompt": "pixel art game background, medieval stone tower kitchen interior, side view platformer style, heavy wooden table with bread and bowls, large stone fireplace with bright crackling fire, warm orange glow filling room, hanging copper pots on wall, wooden chair, shelves with glass jars and pottery, stone tile floor, cozy rustic atmosphere, dark fantasy rpg aesthetic, detailed pixel art, no characters",
         "size": (320, 240),
     },
     "rooms/outside-day": {
-        "prompt": "pixel art, outdoor scene, cliff edge overlooking grey restless sea, stone tower base visible on left, winding dirt path, single wind-bent tree, wild grass, overcast sky with clouds, seabirds in distance, coastal dark fantasy aesthetic, no characters, side view, daytime",
+        "prompt": "pixel art game background, dramatic cliff edge overlooking grey restless ocean, side view platformer style, old stone tower visible on left side, winding dirt path along cliff, single wind-bent gnarled tree, wild grass and wildflowers, overcast dramatic sky with heavy clouds, seabirds flying, waves crashing below, coastal dark fantasy rpg aesthetic, detailed pixel art, no characters, daytime",
         "size": (320, 240),
     },
     "rooms/outside-night": {
-        "prompt": "pixel art, outdoor scene, cliff edge overlooking dark sea at night, stone tower base visible on left with lit window, winding dirt path, single tree silhouette, stars and moon, gentle waves below, coastal dark fantasy aesthetic, no characters, side view, nighttime, dark blue palette",
+        "prompt": "pixel art game background, cliff edge overlooking dark moonlit ocean at night, side view platformer style, old stone tower on left with warm glowing window, winding path, tree silhouette against starry sky, bright moon, twinkling stars, gentle silver waves below, dark blue and purple palette, coastal dark fantasy rpg aesthetic, detailed pixel art, no characters, nighttime",
         "size": (320, 240),
     },
 }
@@ -127,15 +127,15 @@ def generate_sprite(name: str, config: dict, is_room: bool = False) -> bool:
 
     payload = {
         "prompt": config["prompt"],
-        "negative_prompt": "blurry, smooth, photorealistic, 3d render, realistic, photograph, text, watermark, signature, multiple characters, crowd",
+        "negative_prompt": "blurry, smooth, photorealistic, 3d render, realistic, photograph, text, watermark, signature, multiple characters, crowd, low quality, jpeg artifacts, gradient, anti-aliased, soft edges",
         "checkpoint": CHECKPOINT,
         "lora": LORA,
         "lora_strength": LORA_STRENGTH,
-        "quality": "balanced",
-        "width": 512,
-        "height": 512 if not is_room else 384,
+        "quality": "quality",
+        "width": 1024,
+        "height": 1024 if not is_room else 768,
         "seed": -1,
-        "skip_enhance": True,  # use our prompts directly, don't run through Grok
+        "skip_enhance": True,
         "regions_enabled": False,
         "img2img_enabled": False,
         "image_mode": "anime",
