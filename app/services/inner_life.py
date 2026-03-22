@@ -305,3 +305,117 @@ def get_world_snapshot(db: Session) -> str:
 You live in a tower on a cliff. This is what's happening in your life right now — reference it naturally when it fits the conversation, never force it.
 
 {latest.snapshot}"""
+
+
+# ─── Improvisation Extraction ────────────────────────────────
+
+# Known world names for quick-check before spending an LLM call
+_WORLD_NAMES = {"briar", "maren", "lior", "nyx", "tower"}
+
+EXTRACTION_MODEL = "gpt-4.1-nano"  # cheap — just structured extraction
+
+
+def extract_world_details(reply_text: str, db: Session):
+    """
+    Check if Zeph's reply mentions his inner world. If so, extract any
+    improvised details and save them as world events for consistency.
+
+    Runs as a separate pass from user memory consolidation — never mixes
+    fiction with user facts.
+    """
+    if not reply_text:
+        return
+
+    # Quick keyword check — skip LLM call if no world references
+    reply_lower = reply_text.lower()
+    has_reference = any(name in reply_lower for name in _WORLD_NAMES)
+    # Also check for generic references
+    if not has_reference:
+        for hint in ["my dog", "my tower", "the tower", "the bookshop", "my friend", "the cliff", "the coast", "my study", "my desk"]:
+            if hint in reply_lower:
+                has_reference = True
+                break
+
+    if not has_reference:
+        return
+
+    # Load current world objects for context
+    objects = db.query(ZephWorldObject).all()
+    if not objects:
+        return
+
+    obj_names = {obj.name: obj for obj in objects}
+    obj_summary = "\n".join(f"- {obj.name} ({obj.object_type}): {obj.identity[:100]}" for obj in objects)
+
+    system = f"""You extract fictional world details from a chatbot's response. The chatbot is an elf named Zeph who has an inner world with these characters/places:
+
+{obj_summary}
+
+Read Zeph's response and extract any NEW details he improvised about his world — things not just restating known state but adding new information (a story, a memory, a detail about a character, something that happened).
+
+Return a JSON array. Each item:
+{{"object_name": "Briar|Maren|The Tower|etc", "detail": "what was mentioned or improvised (1-2 sentences)", "state_update": {{"key": "value"}} }}
+
+state_update is optional — only include if the response implies a state change (mood, activity, location).
+
+Return [] if the response contains no new fictional details worth saving — don't save generic mentions like "Briar is here" if that's already known state."""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=EXTRACTION_MODEL,
+            max_tokens=300,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Zeph's response:\n\n{reply_text}"},
+            ],
+        )
+
+        text = response.choices[0].message.content if response.choices else "[]"
+        details = _parse_events(text)
+
+        saved = 0
+        for detail in details:
+            obj_name = detail.get("object_name", "")
+            detail_text = detail.get("detail", "")
+            state_update = detail.get("state_update", {})
+
+            obj = obj_names.get(obj_name)
+            if not obj or not detail_text:
+                continue
+
+            # Save as world event
+            db.add(ZephWorldEvent(
+                object_id=obj.id,
+                event=f"[improvised] {detail_text}",
+            ))
+
+            # Update state if provided
+            if state_update:
+                try:
+                    current = json.loads(obj.current_state or "{}")
+                    current.update(state_update)
+                    obj.current_state = json.dumps(current)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Trim old events
+            old_events = (
+                db.query(ZephWorldEvent)
+                .filter(ZephWorldEvent.object_id == obj.id)
+                .order_by(ZephWorldEvent.created_at.desc())
+                .offset(MAX_EVENTS_PER_OBJECT)
+                .all()
+            )
+            for old in old_events:
+                db.delete(old)
+
+            saved += 1
+
+        if saved:
+            db.commit()
+            # Regenerate snapshot so next prompt has the new details
+            _generate_snapshot(db)
+            logger.info(f"Extracted {saved} improvised world detail(s) from Zeph's response")
+
+    except Exception as e:
+        logger.error(f"World detail extraction failed: {e}", exc_info=True)

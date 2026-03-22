@@ -177,7 +177,7 @@ async def telegram_webhook(request: Request):
         # Dispatch background memory work AFTER reply is sent
         if result.is_persistent:
             asyncio.get_event_loop().run_in_executor(
-                None, _run_background_memory, result.user_id, result.session_id
+                None, _run_background_memory, result.user_id, result.session_id, result.text
             )
 
     except Exception as e:
@@ -193,8 +193,8 @@ async def telegram_webhook(request: Request):
     return JSONResponse(content={"ok": True})
 
 
-def _run_background_memory(user_id: int, session_id: str):
-    """Background task: consolidation + session summaries. Runs after reply is sent."""
+def _run_background_memory(user_id: int, session_id: str, reply_text: str = ""):
+    """Background task: consolidation + session summaries + inner life extraction. Runs after reply is sent."""
     from app.services.memory import (
         should_consolidate, consolidate_session,
         should_generate_summary, generate_session_summary,
@@ -214,6 +214,14 @@ def _run_background_memory(user_id: int, session_id: str):
         if should_generate_summary(user, session_id, bg_db):
             logger.info(f"Background session summary for {session_id}")
             generate_session_summary(user, session_id, bg_db)
+
+        # Inner life: extract any improvised world details from Zeph's reply
+        if reply_text:
+            try:
+                from app.services.inner_life import extract_world_details
+                extract_world_details(reply_text, bg_db)
+            except Exception as e:
+                logger.warning(f"Inner life extraction failed (non-fatal): {e}")
 
     except Exception as e:
         logger.error(f"Background memory work failed for {session_id}: {e}", exc_info=True)
