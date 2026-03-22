@@ -563,9 +563,12 @@ def _exec_create_reminder(tool_input, user, db):
     recurring = tool_input.get("recurring")
 
     remind_at = dt.fromisoformat(remind_at_str)
-    # Convert to UTC if timezone-aware
+    # Convert to UTC — assume user's local timezone if naive
     if remind_at.tzinfo:
         remind_at = remind_at.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        local_tz = ZoneInfo(settings.timezone)
+        remind_at = remind_at.replace(tzinfo=local_tz).astimezone(timezone.utc).replace(tzinfo=None)
 
     reminder = Reminder(
         user_id=user.id,
