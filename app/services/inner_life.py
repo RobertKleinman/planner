@@ -28,6 +28,30 @@ MAX_EVENTS_PER_TICK = 3
 TICK_COOLDOWN_HOURS = 12  # minimum hours between ticks
 
 
+def _parse_events(text: str) -> list:
+    """Parse a JSON array from LLM response text."""
+    import re
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    logger.warning("Could not parse inner life LLM response as JSON array")
+    return []
+
+
 # ─── Seed World ──────────────────────────────────────────────
 
 SEED_OBJECTS = [
