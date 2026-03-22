@@ -203,10 +203,28 @@ def run(
     # Load conversation history with session summary
     is_persistent = not session_id.startswith("api:")
     session_summary = None
+    history = []
     if is_persistent:
-        history, session_summary = get_session_context(user, session_id, db)
-    else:
-        history = []
+        try:
+            history, session_summary = get_session_context(user, session_id, db)
+        except Exception as e:
+            logger.warning(f"Session context failed, falling back to raw history: {e}")
+            # Fallback: load raw messages the old way
+            from app.models import ConversationMessage
+            messages = (
+                db.query(ConversationMessage)
+                .filter(ConversationMessage.user_id == user.id, ConversationMessage.session_id == session_id)
+                .order_by(ConversationMessage.created_at.desc())
+                .limit(50)
+                .all()
+            )
+            messages.reverse()
+            for msg in messages:
+                try:
+                    content = json.loads(msg.content)
+                except (json.JSONDecodeError, TypeError):
+                    content = msg.content
+                history.append({"role": msg.role, "content": content})
 
     # Load Zeph's inner world
     world_context = ""
