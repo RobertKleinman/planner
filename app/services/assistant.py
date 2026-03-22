@@ -309,31 +309,15 @@ def run(
     if is_persistent:
         _persist_message(db, user, session_id, "assistant", final_text)
 
-    # Trigger memory consolidation for persistent sessions (every 10 messages)
+    # Trigger memory consolidation for persistent sessions
     if is_persistent and db:
         try:
-            msg_count = db.query(ConversationMessage).filter(
-                ConversationMessage.user_id == user.id,
-                ConversationMessage.session_id == session_id,
-            ).count()
-            # Consolidate every 4 messages (roughly every 2 exchanges)
-            if msg_count > 0 and msg_count % 4 == 0:
-                from app.services.memory import consolidate_session, compact_memories
-                from app.models import ProfileMemory
-                logger.info(f"Triggering consolidation for session {session_id} ({msg_count} messages)")
-                consolidate_session(user, session_id, db)
-
-                # Run compaction if memory count is getting high (every 50 messages)
-                if msg_count % 50 == 0:
-                    profile_count = db.query(ProfileMemory).filter(
-                        ProfileMemory.user_id == user.id,
-                        ProfileMemory.status == "active",
-                    ).count()
-                    if profile_count > COMPACTION_THRESHOLD:
-                        logger.info(f"Triggering compaction ({profile_count} active profiles)")
-                        compact_memories(user, db)
+            from app.services.memory import consolidate_session
+            logger.info(f"Triggering consolidation for session {session_id}")
+            consolidate_session(user, session_id, db)
+            logger.info(f"Consolidation completed for session {session_id}")
         except Exception as e:
-            logger.warning(f"Consolidation trigger failed (non-fatal): {e}")
+            logger.error(f"Consolidation FAILED for session {session_id}: {e}", exc_info=True)
 
     logger.info(f"Assistant done: {len(all_entry_ids)} entries, modules: {all_modules}")
 
