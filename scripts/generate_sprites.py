@@ -110,13 +110,13 @@ def check_api():
         r = requests.get(f"{API_BASE}/status", timeout=5)
         data = r.json()
         if data.get("connected"):
-            print("✓ anime-gen API connected to ComfyUI")
+            print("[OK] anime-gen API connected to ComfyUI")
             return True
         else:
-            print("✗ anime-gen API running but ComfyUI not connected")
+            print("[FAIL] anime-gen API running but ComfyUI not connected")
             return False
     except Exception as e:
-        print(f"✗ anime-gen API not reachable: {e}")
+        print(f"[FAIL] anime-gen API not reachable: {e}")
         print("  Start it with: cd C:\\Users\\rober\\Projects\\imagegenera\\anime-gen && start.bat")
         return False
 
@@ -176,7 +176,7 @@ def generate_sprite(name: str, config: dict, is_room: bool = False) -> bool:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path, "PNG")
 
-        print(f"OK → {output_path} ({target_w}x{target_h})")
+        print(f"OK -> {output_path} ({target_w}x{target_h})")
         return True
 
     except requests.Timeout:
