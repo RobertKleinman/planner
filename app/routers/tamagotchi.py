@@ -358,8 +358,7 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 
 <script>
 const ACTIVITY_ICONS = {
-    reading: '📖', writing: '✒️', magic: '✨', eating: '🍲',
-    sleeping: '💤', walking: '🚶', sitting: '🌙'
+    magic: '✨'
 };
 
 const ROOM_FURNITURE = {
