@@ -319,16 +319,33 @@ def _generate_snapshot(db: Session):
     db.commit()
 
 
+_snapshot_cache = {"text": None, "fetched_at": None}
+_SNAPSHOT_CACHE_TTL = 300  # 5 minutes
+
+
 def get_world_snapshot(db: Session) -> str:
-    """Get the latest world snapshot for system prompt injection. Returns empty string if no world."""
+    """Get the latest world snapshot. Cached in memory for 5 minutes to avoid DB hits."""
+    now = datetime.now(timezone.utc)
+
+    if (_snapshot_cache["text"] is not None
+            and _snapshot_cache["fetched_at"]
+            and (now - _snapshot_cache["fetched_at"]).total_seconds() < _SNAPSHOT_CACHE_TTL):
+        return _snapshot_cache["text"]
+
     latest = db.query(ZephWorldSnapshot).order_by(ZephWorldSnapshot.created_at.desc()).first()
     if not latest:
+        _snapshot_cache["text"] = ""
+        _snapshot_cache["fetched_at"] = now
         return ""
 
-    return f"""## Your inner world
-You live in a tower on a cliff. This is what's happening in your life right now — reference it naturally when it fits the conversation, never force it.
+    result = f"""## Your inner world
+You live in a tower on a cliff. Reference naturally when it fits, never force it.
 
 {latest.snapshot}"""
+
+    _snapshot_cache["text"] = result
+    _snapshot_cache["fetched_at"] = now
+    return result
 
 
 # ─── Improvisation Extraction ────────────────────────────────

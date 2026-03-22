@@ -290,7 +290,11 @@ class TestSnapshot:
         assert "Tower" in snapshot
 
     def test_get_world_snapshot_empty_without_world(self, db):
-        from app.services.inner_life import get_world_snapshot
+        from app.services.inner_life import get_world_snapshot, _snapshot_cache
+
+        # Clear cache from previous tests
+        _snapshot_cache["text"] = None
+        _snapshot_cache["fetched_at"] = None
 
         snapshot = get_world_snapshot(db)
         assert snapshot == ""
