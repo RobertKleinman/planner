@@ -220,11 +220,22 @@ def run(
     for round_num in range(MAX_TOOL_ROUNDS):
         logger.info(f"Assistant round {round_num + 1} for {user.name} (session: {session_id})")
 
+        # Add cache_control to the last tool so everything up to and
+        # including tool definitions is cached (~2000 tokens, identical every request)
+        cached_tools = TOOLS.copy()
+        cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+
+        # System prompt as cacheable blocks — static personality cached,
+        # dynamic memory/summary not cached
+        system_blocks = [
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
+        ]
+
         response = anthropic_client.messages.create(
             model=settings.intent_model,
             max_tokens=1024,
-            system=system_prompt,
-            tools=TOOLS,
+            system=system_blocks,
+            tools=cached_tools,
             messages=messages,
         )
 
