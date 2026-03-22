@@ -174,6 +174,12 @@ async def telegram_webhook(request: Request):
         if reply:
             await bot.send_message(chat_id=chat_id, text=reply)
 
+        # Dispatch background memory work AFTER reply is sent
+        if result.is_persistent:
+            asyncio.get_event_loop().run_in_executor(
+                None, _run_background_memory, result.user_id, result.session_id
+            )
+
     except Exception as e:
         logger.error(f"Telegram webhook error: {e}", exc_info=True)
         try:
@@ -185,3 +191,31 @@ async def telegram_webhook(request: Request):
         db.close()
 
     return JSONResponse(content={"ok": True})
+
+
+def _run_background_memory(user_id: int, session_id: str):
+    """Background task: consolidation + session summaries. Runs after reply is sent."""
+    from app.services.memory import (
+        should_consolidate, consolidate_session,
+        should_generate_summary, generate_session_summary,
+    )
+    bg_db = SessionLocal()
+    try:
+        user = bg_db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return
+
+        # Consolidation (if enough new messages)
+        if should_consolidate(user, session_id, bg_db):
+            logger.info(f"Background consolidation for {session_id}")
+            consolidate_session(user, session_id, bg_db)
+
+        # Session summary (if enough new messages since last summary)
+        if should_generate_summary(user, session_id, bg_db):
+            logger.info(f"Background session summary for {session_id}")
+            generate_session_summary(user, session_id, bg_db)
+
+    except Exception as e:
+        logger.error(f"Background memory work failed for {session_id}: {e}", exc_info=True)
+    finally:
+        bg_db.close()

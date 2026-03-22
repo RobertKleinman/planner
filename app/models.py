@@ -242,6 +242,42 @@ class HypothesisMemory(Base):
     user = relationship("User")
 
 
+class SessionSummary(Base):
+    """Compressed summary of a conversation window for medium-term context."""
+    __tablename__ = "session_summaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    session_id = Column(String, nullable=False, index=True)
+
+    summary = Column(Text, nullable=False)                          # 200-300 tokens
+    message_id_start = Column(Integer, nullable=False)              # first message ID covered
+    message_id_end = Column(Integer, nullable=False)                # last message ID covered
+    message_count = Column(Integer, nullable=False)                 # how many messages summarized
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
+
+
+class ConsolidationCheckpoint(Base):
+    """Tracks consolidation progress per user/session to enable delta processing."""
+    __tablename__ = "consolidation_checkpoints"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    session_id = Column(String, nullable=False, index=True)
+
+    last_consolidated_message_id = Column(Integer, nullable=False, default=0)
+    last_consolidated_at = Column(DateTime, nullable=True)
+    last_decay_at = Column(DateTime, nullable=True)
+    is_consolidating = Column(Boolean, nullable=False, default=False)  # simple lock flag
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
+
+
 class NotificationContact(Base):
     __tablename__ = "notification_contacts"
 

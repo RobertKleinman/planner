@@ -2,7 +2,8 @@
 services/assistant.py — Conversational Assistant (Claude Tool Use)
 ==================================================================
 Single entry point: AssistantService.run()
-Replaces classify_intent + handler routing with a conversational loop.
+Consolidation and session summaries are triggered AFTER the response,
+not during the request path.
 """
 
 import json
@@ -18,11 +19,9 @@ from app.config import settings
 from app.models import User, ConversationMessage, MemoTopic
 from app.services.clients import anthropic_client
 from app.services.tools import TOOLS, execute_tool
-from app.services.memory import get_relevant_memories, COMPACTION_THRESHOLD
 
 logger = logging.getLogger("planner.assistant")
 
-MAX_HISTORY = 50  # last N messages loaded for session context
 MAX_TOOL_ROUNDS = 10  # safety limit on tool loop iterations
 
 
@@ -31,11 +30,15 @@ class AssistantResponse:
     text: str
     entry_ids: list = field(default_factory=list)
     modules_used: list = field(default_factory=list)
-    images: list = field(default_factory=list)  # list of image bytes
+    images: list = field(default_factory=list)
+    # Metadata for post-response background work
+    user_id: int = 0
+    session_id: str = ""
+    is_persistent: bool = False
 
 
-def _build_system_prompt(user: User, memo_topics: list = None, memory_context: str = None) -> str:
-    """Build the assistant system prompt with user context and memories."""
+def _build_system_prompt(user: User, memo_topics: list = None, memory_context: str = None, session_summary: str = None) -> str:
+    """Build the assistant system prompt with user context, memories, and session summary."""
     tz = ZoneInfo(settings.timezone)
     now = datetime.now(tz)
 
@@ -103,6 +106,12 @@ When you use tools to create tasks, calendar events, journal entries, memos, or 
 The user tracks these topics. When creating memos, if content relates to a topic, mention it.
 {chr(10).join(topic_lines)}"""
 
+    if session_summary:
+        prompt += f"""
+
+## Conversation so far
+{session_summary}"""
+
     if memory_context:
         prompt += f"""
 
@@ -112,32 +121,6 @@ When you notice something about {user.name} that seems like a pattern or when th
 Never state hypotheses as certain facts. Use language like "I've noticed..." or "It seems like..." for inferred patterns."""
 
     return prompt
-
-
-def _load_history(db: Session, user: User, session_id: str) -> list:
-    """Load recent conversation messages for a session."""
-    messages = (
-        db.query(ConversationMessage)
-        .filter(
-            ConversationMessage.user_id == user.id,
-            ConversationMessage.session_id == session_id,
-        )
-        .order_by(ConversationMessage.created_at.desc())
-        .limit(MAX_HISTORY)
-        .all()
-    )
-    # Reverse to chronological order
-    messages.reverse()
-
-    history = []
-    for msg in messages:
-        try:
-            content = json.loads(msg.content)
-        except (json.JSONDecodeError, TypeError):
-            content = msg.content
-        history.append({"role": msg.role, "content": content})
-
-    return history
 
 
 def _persist_message(db: Session, user: User, session_id: str, role: str, content):
@@ -194,7 +177,10 @@ def run(
     """
     Main entry point. Send a message, get a response.
     Handles the full tool-use loop internally.
+    Consolidation is NOT done here — caller dispatches it after response.
     """
+    from app.services.memory import get_relevant_memories, get_session_context
+
     # Load memo topics for system prompt
     memo_topics = db.query(MemoTopic).filter(
         MemoTopic.user_id == user.id, MemoTopic.is_active == True
@@ -208,16 +194,25 @@ def run(
         except Exception as e:
             logger.warning(f"Memory retrieval failed (non-fatal): {e}")
 
-    system_prompt = _build_system_prompt(user, memo_topics if memo_topics else None, memory_context or None)
-
-    # Load conversation history (only for persistent sessions)
+    # Load conversation history with session summary
     is_persistent = not session_id.startswith("api:")
-    history = _load_history(db, user, session_id) if is_persistent else []
+    session_summary = None
+    if is_persistent:
+        history, session_summary = get_session_context(user, session_id, db)
+    else:
+        history = []
+
+    system_prompt = _build_system_prompt(
+        user,
+        memo_topics if memo_topics else None,
+        memory_context or None,
+        session_summary,
+    )
 
     # Build the new user message
     user_content = _build_user_content(message_text, image_bytes, image_media_type)
 
-    # For persistent sessions, store user message (text version for storage — images excluded to save space)
+    # For persistent sessions, store user message
     if is_persistent:
         _persist_message(db, user, session_id, "user", message_text or "(image)")
 
@@ -240,18 +235,15 @@ def run(
             messages=messages,
         )
 
-        # Check if response contains tool use
         has_tool_use = any(block.type == "tool_use" for block in response.content)
 
         if not has_tool_use:
-            # Text-only response — we're done
             final_text = ""
             for block in response.content:
                 if block.type == "text":
                     final_text += block.text
             break
 
-        # Execute tools and build result message
         assistant_content = []
         tool_results = []
 
@@ -266,7 +258,6 @@ def run(
                     "input": block.input,
                 })
 
-                # Execute the tool
                 logger.info(f"Executing tool: {block.name}({json.dumps(block.input)[:200]})")
                 result = execute_tool(
                     tool_name=block.name,
@@ -289,17 +280,15 @@ def run(
                     "content": result.content,
                 })
 
-        # Append assistant message (with tool_use blocks) and user message (with tool_results)
         messages.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "user", "content": tool_results})
 
-        # Persist tool interactions so conversation memory includes what the bot *did*
         if is_persistent:
             _persist_message(db, user, session_id, "assistant", assistant_content)
             _persist_message(db, user, session_id, "user", tool_results)
     else:
-        # Hit max rounds — extract whatever text we have
         final_text = "I got a bit tangled up. Could you try that again?"
+        logger.warning(f"Hit MAX_TOOL_ROUNDS for {user.name} (session: {session_id})")
         for block in response.content:
             if block.type == "text":
                 final_text = block.text
@@ -309,16 +298,6 @@ def run(
     if is_persistent:
         _persist_message(db, user, session_id, "assistant", final_text)
 
-    # Trigger memory consolidation for persistent sessions
-    if is_persistent and db:
-        try:
-            from app.services.memory import consolidate_session
-            logger.info(f"Triggering consolidation for session {session_id}")
-            consolidate_session(user, session_id, db)
-            logger.info(f"Consolidation completed for session {session_id}")
-        except Exception as e:
-            logger.error(f"Consolidation FAILED for session {session_id}: {e}", exc_info=True)
-
     logger.info(f"Assistant done: {len(all_entry_ids)} entries, modules: {all_modules}")
 
     return AssistantResponse(
@@ -326,4 +305,7 @@ def run(
         entry_ids=all_entry_ids,
         images=all_images,
         modules_used=all_modules,
+        user_id=user.id,
+        session_id=session_id,
+        is_persistent=is_persistent,
     )

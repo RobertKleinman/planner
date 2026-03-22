@@ -107,8 +107,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to set Telegram webhook: {e}", exc_info=True)
 
-    # Start background reminder checker
+    # Start background loops
     reminder_task = None
+    memory_task = None
     if settings.telegram_bot_token:
         async def _reminder_loop():
             import asyncio
@@ -120,15 +121,60 @@ async def lifespan(app: FastAPI):
                     logger.error(f"Reminder check failed: {e}", exc_info=True)
                 await asyncio.sleep(60)  # every 1 minute
 
+        async def _memory_maintenance_loop():
+            """Daily decay, compaction, and recovery sweep."""
+            import asyncio
+            from datetime import timedelta
+            while True:
+                await asyncio.sleep(3600)  # check every hour
+                try:
+                    from app.database import SessionLocal
+                    from app.services.memory import decay_old_memories, compact_memories, recovery_sweep, COMPACTION_THRESHOLD
+                    from app.models import ConsolidationCheckpoint, ProfileMemory
+
+                    maint_db = SessionLocal()
+                    try:
+                        # Check if decay is due (daily)
+                        checkpoints = maint_db.query(ConsolidationCheckpoint).all()
+                        for cp in checkpoints:
+                            if cp.last_decay_at is None or (datetime.now(timezone.utc) - cp.last_decay_at) > timedelta(hours=24):
+                                user = maint_db.query(models.User).filter(models.User.id == cp.user_id).first()
+                                if user:
+                                    logger.info(f"Running daily decay for user {user.name}")
+                                    decay_old_memories(user, maint_db)
+                                    cp.last_decay_at = datetime.now(timezone.utc)
+                                    maint_db.commit()
+
+                                    # Compaction if needed
+                                    profile_count = maint_db.query(ProfileMemory).filter(
+                                        ProfileMemory.user_id == user.id, ProfileMemory.status == "active"
+                                    ).count()
+                                    if profile_count > COMPACTION_THRESHOLD:
+                                        logger.info(f"Running compaction for user {user.name}")
+                                        compact_memories(user, maint_db)
+
+                        # Recovery sweep for stranded sessions
+                        recovery_sweep(maint_db)
+
+                    finally:
+                        maint_db.close()
+
+                except Exception as e:
+                    logger.error(f"Memory maintenance failed: {e}", exc_info=True)
+
         import asyncio
         reminder_task = asyncio.create_task(_reminder_loop())
-        logger.info("Background reminder checker started (every 5 min)")
+        memory_task = asyncio.create_task(_memory_maintenance_loop())
+        logger.info("Background reminder checker started (every 1 min)")
+        logger.info("Background memory maintenance started (hourly check)")
 
     yield
 
     # Clean up background tasks
     if reminder_task:
         reminder_task.cancel()
+    if memory_task:
+        memory_task.cancel()
 
     # Note: we intentionally do NOT delete the webhook on shutdown.
     # The webhook stays registered so Telegram queues messages during

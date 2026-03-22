@@ -1,8 +1,8 @@
 """
 backfill_memories.py — Consolidate existing conversations into memory
 ======================================================================
-Runs the consolidation pipeline on all existing conversation sessions
-to populate ProfileMemory, EpisodicMemory, and HypothesisMemory.
+Idempotent: tracks which sessions have been processed via ConsolidationCheckpoint.
+Only processes messages not yet consolidated.
 
 Usage:
     python -m scripts.backfill_memories
@@ -16,20 +16,17 @@ from sqlalchemy import func
 from app.database import SessionLocal, engine, Base
 from app.models import User, ConversationMessage
 
-# Ensure tables exist
 Base.metadata.create_all(bind=engine)
 
 
 def backfill():
     db = SessionLocal()
     try:
-        # Get all users
         users = db.query(User).filter(User.is_active == True).all()
 
         for user in users:
             print(f"\nProcessing user: {user.name} (ID: {user.id})")
 
-            # Get all unique session IDs with message counts
             sessions = (
                 db.query(
                     ConversationMessage.session_id,
@@ -37,7 +34,7 @@ def backfill():
                 )
                 .filter(ConversationMessage.user_id == user.id)
                 .group_by(ConversationMessage.session_id)
-                .having(func.count(ConversationMessage.id) >= 4)  # skip tiny sessions
+                .having(func.count(ConversationMessage.id) >= 4)
                 .order_by(func.min(ConversationMessage.created_at))
                 .all()
             )
@@ -45,7 +42,21 @@ def backfill():
             print(f"  Found {len(sessions)} sessions with 4+ messages")
 
             for session_id, msg_count in sessions:
-                print(f"  Consolidating session {session_id} ({msg_count} messages)...", end=" ", flush=True)
+                # Check if already fully consolidated
+                from app.services.memory import _get_or_create_checkpoint
+                checkpoint = _get_or_create_checkpoint(user, session_id, db)
+
+                max_msg_id = db.query(func.max(ConversationMessage.id)).filter(
+                    ConversationMessage.user_id == user.id,
+                    ConversationMessage.session_id == session_id,
+                ).scalar() or 0
+
+                remaining = max_msg_id - checkpoint.last_consolidated_message_id
+                if remaining < 4:
+                    print(f"  Skipping {session_id} — already consolidated")
+                    continue
+
+                print(f"  Consolidating {session_id} ({remaining} new messages)...", end=" ", flush=True)
                 try:
                     from app.services.memory import consolidate_session
                     consolidate_session(user, session_id, db)

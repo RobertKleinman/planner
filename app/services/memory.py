@@ -1,35 +1,81 @@
 """
 services/memory.py — Layered Memory System
 =============================================
-Handles consolidation (end-of-session extraction), retrieval (keyword+ranking),
-and injection (formatting memories for the system prompt).
+Handles consolidation (delta-based extraction), retrieval (keyword+ranking),
+session summaries (medium-term context), compaction, and decay.
+
+Uses GPT-4.1-nano for all background tasks (consolidation, compaction, summaries).
+Live conversation stays on Claude Sonnet via assistant.py.
 
 Modules:
   - ProfileMemory: stable facts (user-stated or inferred)
   - EpisodicMemory: notable events or recurring situations
   - HypothesisMemory: inferred patterns with confidence tracking
+  - SessionSummary: compressed conversation windows
 """
 
 import json
+import re
 import logging
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func, text
 
 from app.models import (
     User, ProfileMemory, EpisodicMemory, HypothesisMemory,
-    ConversationMessage,
+    ConversationMessage, SessionSummary, ConsolidationCheckpoint,
 )
-from app.services.clients import anthropic_client
+from app.services.clients import openai_client, BACKGROUND_MODEL
 from app.config import settings
 
 logger = logging.getLogger("planner.memory")
 
-# How many memories to inject into the system prompt
+# ─── Constants ───────────────────────────────────────────────
+
 MAX_PROFILE_INJECT = 50
 MAX_EPISODE_INJECT = 15
 MAX_HYPOTHESIS_INJECT = 8
-HYPOTHESIS_INJECT_THRESHOLD = 0.4  # minimum confidence to inject
+HYPOTHESIS_INJECT_THRESHOLD = 0.4
+
+CONSOLIDATION_MESSAGE_THRESHOLD = 20   # consolidate every N new messages
+CONSOLIDATION_MAX_INPUT_MESSAGES = 100  # hard cap on messages sent to LLM
+SUMMARY_MESSAGE_INTERVAL = 20          # generate session summary every N messages
+COMPACTION_THRESHOLD = 30
+MAX_HISTORY = 15                        # raw messages to load (with summary)
+MAX_HISTORY_NO_SUMMARY = 50             # raw messages to load (without summary)
+
+
+# ─── Background LLM Call ─────────────────────────────────────
+
+def _background_llm_call(system: str, user_content: str, tools: list = None, max_tokens: int = 2048) -> dict:
+    """Make an LLM call using the cheap background model (GPT-4.1-nano via OpenAI)."""
+    messages = [{"role": "user", "content": user_content}]
+
+    kwargs = {
+        "model": BACKGROUND_MODEL,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ],
+    }
+
+    if tools:
+        # Convert Anthropic tool format to OpenAI function format
+        openai_tools = []
+        for t in tools:
+            openai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {}),
+                },
+            })
+        kwargs["tools"] = openai_tools
+
+    response = openai_client.chat.completions.create(**kwargs)
+    return response
 
 
 # ─── Retrieval ───────────────────────────────────────────────
@@ -38,13 +84,11 @@ def get_relevant_memories(user: User, message_text: str, db: Session) -> str:
     """Retrieve and format relevant memories for system prompt injection."""
     sections = []
 
-    # 1. Profile memories — always include top active ones
     profiles = _get_profile_memories(user, message_text, db)
     if profiles:
         lines = [f"- [{p.category}] {p.content}" for p in profiles]
         sections.append("### Known facts about you\n" + "\n".join(lines))
 
-    # 2. Episodic memories — recent/important episodes
     episodes = _get_episodic_memories(user, message_text, db)
     if episodes:
         lines = []
@@ -55,7 +99,6 @@ def get_relevant_memories(user: User, message_text: str, db: Session) -> str:
             lines.append(f"- {e.summary}{time_str}")
         sections.append("### Notable events/situations\n" + "\n".join(lines))
 
-    # 3. Hypothesis memories — only confident ones
     hypotheses = _get_hypothesis_memories(user, message_text, db)
     if hypotheses:
         lines = []
@@ -73,28 +116,77 @@ def get_relevant_memories(user: User, message_text: str, db: Session) -> str:
     return "## Your Memory\n" + "\n\n".join(sections)
 
 
+def get_session_context(user: User, session_id: str, db: Session) -> tuple:
+    """
+    Get conversation context: session summary + recent raw messages.
+    Returns (history_messages: list, summary_text: str or None).
+    """
+    # Check for a session summary
+    latest_summary = (
+        db.query(SessionSummary)
+        .filter(
+            SessionSummary.user_id == user.id,
+            SessionSummary.session_id == session_id,
+        )
+        .order_by(SessionSummary.created_at.desc())
+        .first()
+    )
+
+    if latest_summary:
+        # Load only recent messages after the summary
+        limit = MAX_HISTORY
+        messages = (
+            db.query(ConversationMessage)
+            .filter(
+                ConversationMessage.user_id == user.id,
+                ConversationMessage.session_id == session_id,
+            )
+            .order_by(ConversationMessage.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        messages.reverse()
+    else:
+        # No summary yet — load more raw messages
+        limit = MAX_HISTORY_NO_SUMMARY
+        messages = (
+            db.query(ConversationMessage)
+            .filter(
+                ConversationMessage.user_id == user.id,
+                ConversationMessage.session_id == session_id,
+            )
+            .order_by(ConversationMessage.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        messages.reverse()
+
+    history = []
+    for msg in messages:
+        try:
+            content = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            content = msg.content
+        history.append({"role": msg.role, "content": content})
+
+    return history, latest_summary.summary if latest_summary else None
+
+
 def _get_profile_memories(user: User, message_text: str, db: Session) -> list:
-    """Get active profile memories, optionally filtered by relevance."""
     query = db.query(ProfileMemory).filter(
         ProfileMemory.user_id == user.id,
         ProfileMemory.status == "active",
     )
-
-    # If message has keywords, prioritize matching ones but still include all
     if message_text:
         keywords = _extract_keywords(message_text)
         if keywords:
-            # Get keyword-matching ones first
             pattern_filters = []
             for kw in keywords[:5]:
                 pat = f"%{kw}%"
                 pattern_filters.append(ProfileMemory.content.ilike(pat))
                 pattern_filters.append(ProfileMemory.tags.ilike(pat))
-
             matching = query.filter(or_(*pattern_filters)).limit(MAX_PROFILE_INJECT).all()
             matching_ids = {m.id for m in matching}
-
-            # Fill remaining slots with recent non-matching ones
             remaining = MAX_PROFILE_INJECT - len(matching)
             if remaining > 0:
                 others = query.filter(
@@ -102,17 +194,14 @@ def _get_profile_memories(user: User, message_text: str, db: Session) -> list:
                 ).order_by(ProfileMemory.created_at.desc()).limit(remaining).all()
                 return matching + others
             return matching
-
     return query.order_by(ProfileMemory.created_at.desc()).limit(MAX_PROFILE_INJECT).all()
 
 
 def _get_episodic_memories(user: User, message_text: str, db: Session) -> list:
-    """Get recent/important episodic memories."""
     query = db.query(EpisodicMemory).filter(
         EpisodicMemory.user_id == user.id,
         EpisodicMemory.status == "active",
     )
-
     if message_text:
         keywords = _extract_keywords(message_text)
         if keywords:
@@ -124,8 +213,6 @@ def _get_episodic_memories(user: User, message_text: str, db: Session) -> list:
             matching = query.filter(or_(*pattern_filters)).limit(MAX_EPISODE_INJECT).all()
             if matching:
                 return matching
-
-    # Default: most important recent episodes
     return query.order_by(
         EpisodicMemory.importance.desc(),
         EpisodicMemory.updated_at.desc(),
@@ -133,13 +220,11 @@ def _get_episodic_memories(user: User, message_text: str, db: Session) -> list:
 
 
 def _get_hypothesis_memories(user: User, message_text: str, db: Session) -> list:
-    """Get confident hypothesis memories relevant to the conversation."""
     query = db.query(HypothesisMemory).filter(
         HypothesisMemory.user_id == user.id,
         HypothesisMemory.status.in_(["provisional", "active"]),
         HypothesisMemory.confidence >= HYPOTHESIS_INJECT_THRESHOLD,
     )
-
     if message_text:
         keywords = _extract_keywords(message_text)
         if keywords:
@@ -151,14 +236,10 @@ def _get_hypothesis_memories(user: User, message_text: str, db: Session) -> list
             matching = query.filter(or_(*pattern_filters)).limit(MAX_HYPOTHESIS_INJECT).all()
             if matching:
                 return matching
-
-    return query.order_by(
-        HypothesisMemory.confidence.desc(),
-    ).limit(MAX_HYPOTHESIS_INJECT).all()
+    return query.order_by(HypothesisMemory.confidence.desc()).limit(MAX_HYPOTHESIS_INJECT).all()
 
 
 def _extract_keywords(text: str) -> list[str]:
-    """Simple keyword extraction: split, remove stopwords, keep meaningful words."""
     stopwords = {
         "i", "me", "my", "we", "our", "you", "your", "the", "a", "an", "is", "are",
         "was", "were", "be", "been", "being", "have", "has", "had", "do", "does",
@@ -179,73 +260,88 @@ def _extract_keywords(text: str) -> list[str]:
     return [w.strip(".,!?;:'\"()") for w in words if len(w) > 2 and w.lower().strip(".,!?;:'\"()") not in stopwords]
 
 
-# ─── Consolidation ──────────────────────────────────────────
+# ─── Consolidation (Delta-Based) ────────────────────────────
+
+CONSOLIDATION_SYSTEM_PROMPT = """You are a memory consolidation system. Extract durable knowledge from conversations.
+
+Extract:
+1. **Profile facts**: Stable things about the user (identity, preferences, relationships). Only save things likely to be true beyond this conversation.
+2. **Episodes**: Notable events or situations worth remembering.
+3. **Hypotheses**: Behavioral patterns — but ONLY if there's genuine evidence, not speculation from a single remark.
+4. **Updates**: If anything contradicts or updates existing memories, use update tools.
+
+Rules:
+- Do NOT save trivial task details or ephemeral information
+- Do NOT duplicate existing facts — check existing memories below
+- Keep summaries concise: profile facts 20-80 tokens, episodes 50-120 tokens
+- Confidence: 1.0 = user stated it directly, 0.7-0.9 = strongly implied, 0.3-0.6 = inferred
+- It's fine to extract nothing if the conversation has no durable information"""
 
 CONSOLIDATION_TOOLS = [
     {
         "name": "save_profile_fact",
-        "description": "Save a stable fact about the user: identity, preference, relationship, project, or other durable information.",
+        "description": "Save a stable fact about the user.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "The fact (20-80 tokens, concise)"},
-                "category": {"type": "string", "enum": ["Identity", "Preference", "Relationship", "Project", "Work", "Health", "Home", "Finance", "Personal"], "description": "Category of fact"},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "2-4 keyword tags"},
-                "confidence": {"type": "number", "description": "1.0 if user stated it directly, 0.7-0.9 if strongly implied"},
-                "source": {"type": "string", "enum": ["explicit", "inferred"], "description": "Whether user stated this directly or it was inferred"},
+                "content": {"type": "string", "description": "The fact (20-80 tokens)"},
+                "category": {"type": "string", "enum": ["Identity", "Preference", "Relationship", "Project", "Work", "Health", "Home", "Finance", "Personal"]},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": "number"},
+                "source": {"type": "string", "enum": ["explicit", "inferred"]},
             },
             "required": ["content", "category"],
         },
     },
     {
         "name": "save_episode",
-        "description": "Save a notable event or recurring situation from the conversation.",
+        "description": "Save a notable event or recurring situation.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "description": "Summary of the event/situation (50-120 tokens)"},
-                "importance": {"type": "number", "description": "0.0-1.0, how significant this is for understanding the user"},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "2-4 keyword tags"},
+                "summary": {"type": "string", "description": "Summary (50-120 tokens)"},
+                "importance": {"type": "number"},
+                "tags": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["summary"],
         },
     },
     {
         "name": "propose_hypothesis",
-        "description": "Propose a behavioral pattern or tendency you noticed about the user. Only use if you see a genuine pattern, not a one-time occurrence.",
+        "description": "Propose a behavioral pattern. Only use for genuine patterns, not one-time remarks.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "short_summary": {"type": "string", "description": "Brief pattern description (30-50 tokens)"},
-                "long_summary": {"type": "string", "description": "Detailed explanation with context (80-140 tokens)"},
-                "category": {"type": "string", "enum": ["behavioral", "emotional", "preference", "relational", "work_style"], "description": "Type of pattern"},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "2-4 keyword tags"},
+                "short_summary": {"type": "string"},
+                "long_summary": {"type": "string"},
+                "category": {"type": "string", "enum": ["behavioral", "emotional", "preference", "relational", "work_style"]},
+                "tags": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["short_summary", "long_summary", "category"],
         },
     },
     {
         "name": "update_hypothesis",
-        "description": "Update an existing hypothesis with new supporting or contradicting evidence.",
+        "description": "Update an existing hypothesis with new evidence.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "hypothesis_id": {"type": "integer", "description": "ID of the hypothesis to update"},
-                "supports": {"type": "boolean", "description": "True if this conversation supports the hypothesis, false if it contradicts it"},
-                "reason": {"type": "string", "description": "Brief explanation of the evidence"},
+                "hypothesis_id": {"type": "integer"},
+                "supports": {"type": "boolean"},
+                "reason": {"type": "string"},
             },
             "required": ["hypothesis_id", "supports"],
         },
     },
     {
         "name": "update_profile_fact",
-        "description": "Update or supersede an existing profile fact that has changed.",
+        "description": "Supersede an existing profile fact that has changed.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "old_fact_id": {"type": "integer", "description": "ID of the fact to supersede"},
-                "new_content": {"type": "string", "description": "Updated content"},
-                "reason": {"type": "string", "description": "Why it changed"},
+                "old_fact_id": {"type": "integer"},
+                "new_content": {"type": "string"},
+                "reason": {"type": "string"},
             },
             "required": ["old_fact_id", "new_content"],
         },
@@ -253,96 +349,164 @@ CONSOLIDATION_TOOLS = [
 ]
 
 
+def should_consolidate(user: User, session_id: str, db: Session) -> bool:
+    """Check if consolidation should run based on message count and time thresholds."""
+    checkpoint = _get_or_create_checkpoint(user, session_id, db)
+
+    # Don't run if already consolidating (simple lock)
+    if checkpoint.is_consolidating:
+        return False
+
+    # Count new messages since last consolidation
+    new_count = db.query(ConversationMessage).filter(
+        ConversationMessage.user_id == user.id,
+        ConversationMessage.session_id == session_id,
+        ConversationMessage.id > checkpoint.last_consolidated_message_id,
+    ).count()
+
+    if new_count >= CONSOLIDATION_MESSAGE_THRESHOLD:
+        return True
+
+    # Also consolidate if it's been 24+ hours
+    if checkpoint.last_consolidated_at:
+        hours_since = (datetime.now(timezone.utc) - checkpoint.last_consolidated_at).total_seconds() / 3600
+        if hours_since >= 24 and new_count >= 4:
+            return True
+
+    return False
+
+
 def consolidate_session(user: User, session_id: str, db: Session):
     """
-    End-of-session consolidation: extract facts, episodes, and hypotheses
-    from the conversation. Called when session ends.
+    Delta-based consolidation: only process messages since last checkpoint.
+    Uses PostgreSQL advisory lock for concurrency safety.
     """
-    # Load session messages
-    messages = (
-        db.query(ConversationMessage)
-        .filter(
-            ConversationMessage.user_id == user.id,
-            ConversationMessage.session_id == session_id,
-        )
-        .order_by(ConversationMessage.created_at.asc())
-        .all()
-    )
+    checkpoint = _get_or_create_checkpoint(user, session_id, db)
 
-    if len(messages) < 2:
-        logger.info(f"Skipping consolidation for session {session_id}: too few messages")
+    # Atomic lock acquisition
+    acquired = db.execute(
+        text("UPDATE consolidation_checkpoints SET is_consolidating = true WHERE id = :id AND is_consolidating = false RETURNING id"),
+        {"id": checkpoint.id}
+    ).fetchone()
+    db.commit()
+
+    if not acquired:
+        logger.info(f"Consolidation already running for session {session_id}, skipping")
         return
 
-    # Format conversation for the consolidator
-    conversation_text = _format_conversation_for_consolidation(messages)
+    try:
+        # Drain loop: keep processing until no new messages
+        while True:
+            # Refresh checkpoint
+            db.refresh(checkpoint)
 
-    # Load existing memories for context (avoid duplicates)
+            new_messages = (
+                db.query(ConversationMessage)
+                .filter(
+                    ConversationMessage.user_id == user.id,
+                    ConversationMessage.session_id == session_id,
+                    ConversationMessage.id > checkpoint.last_consolidated_message_id,
+                )
+                .order_by(ConversationMessage.created_at.asc())
+                .limit(CONSOLIDATION_MAX_INPUT_MESSAGES)
+                .all()
+            )
+
+            if len(new_messages) < 4:
+                break  # Not enough new material
+
+            conversation_text = _format_conversation_for_consolidation(new_messages)
+            max_message_id = max(m.id for m in new_messages)
+
+            # Build existing memory context
+            existing_context = _build_existing_memory_context(user, db)
+
+            system = CONSOLIDATION_SYSTEM_PROMPT
+            if existing_context:
+                system += f"\n\n{existing_context}"
+
+            # LLM call via cheap background model
+            response = _background_llm_call(
+                system=system,
+                user_content=f"Here is the conversation to consolidate:\n\n{conversation_text}",
+                tools=CONSOLIDATION_TOOLS,
+            )
+
+            # Process tool calls — all writes + checkpoint in one transaction
+            if response.choices and response.choices[0].message.tool_calls:
+                for tool_call in response.choices[0].message.tool_calls:
+                    tool_input = json.loads(tool_call.function.arguments)
+                    _process_consolidation_tool(
+                        tool_name=tool_call.function.name,
+                        tool_input=tool_input,
+                        user=user,
+                        session_id=session_id,
+                        db=db,
+                    )
+
+            # Advance checkpoint atomically with memory writes
+            checkpoint.last_consolidated_message_id = max_message_id
+            checkpoint.last_consolidated_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(f"Consolidated session {session_id} up to message {max_message_id}")
+
+            # Check if there are more messages (drain loop)
+            remaining = db.query(ConversationMessage).filter(
+                ConversationMessage.user_id == user.id,
+                ConversationMessage.session_id == session_id,
+                ConversationMessage.id > max_message_id,
+            ).count()
+
+            if remaining < 4:
+                break
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Consolidation failed for session {session_id}: {e}", exc_info=True)
+    finally:
+        # Release lock
+        checkpoint.is_consolidating = False
+        db.commit()
+
+
+def _get_or_create_checkpoint(user: User, session_id: str, db: Session) -> ConsolidationCheckpoint:
+    checkpoint = db.query(ConsolidationCheckpoint).filter(
+        ConsolidationCheckpoint.user_id == user.id,
+        ConsolidationCheckpoint.session_id == session_id,
+    ).first()
+    if not checkpoint:
+        checkpoint = ConsolidationCheckpoint(
+            user_id=user.id,
+            session_id=session_id,
+            last_consolidated_message_id=0,
+        )
+        db.add(checkpoint)
+        db.commit()
+        db.refresh(checkpoint)
+    return checkpoint
+
+
+def _build_existing_memory_context(user: User, db: Session) -> str:
     existing_profiles = db.query(ProfileMemory).filter(
         ProfileMemory.user_id == user.id,
         ProfileMemory.status == "active",
     ).all()
-
     existing_hypotheses = db.query(HypothesisMemory).filter(
         HypothesisMemory.user_id == user.id,
         HypothesisMemory.status.in_(["provisional", "active"]),
     ).all()
 
-    existing_context = ""
+    parts = []
     if existing_profiles:
         lines = [f"- [ID:{p.id}] [{p.category}] {p.content}" for p in existing_profiles]
-        existing_context += "## Existing profile facts:\n" + "\n".join(lines) + "\n\n"
+        parts.append("## Existing profile facts:\n" + "\n".join(lines))
     if existing_hypotheses:
         lines = [f"- [ID:{h.id}] [{h.category}] {h.short_summary} (confidence: {h.confidence})" for h in existing_hypotheses]
-        existing_context += "## Existing hypotheses:\n" + "\n".join(lines) + "\n\n"
-
-    system_prompt = f"""You are a memory consolidation system. Your job is to extract durable knowledge from conversations.
-
-Read the conversation and extract:
-1. **Profile facts**: Stable things about the user (identity, preferences, relationships, projects). Only save things likely to be true beyond this conversation.
-2. **Episodes**: Notable events or situations worth remembering for context.
-3. **Hypotheses**: Behavioral patterns you notice — but ONLY if there's genuine evidence, not speculation from a single remark.
-4. **Updates**: If anything in the conversation contradicts or updates existing memories, use the update tools.
-
-Rules:
-- Do NOT save trivial task details or ephemeral information (what they had for lunch, routine requests)
-- Do NOT duplicate existing facts — check the existing memories below
-- If a fact already exists but has changed, use update_profile_fact to supersede it
-- If an existing hypothesis is supported or contradicted by this conversation, use update_hypothesis
-- Keep summaries concise: profile facts 20-80 tokens, episodes 50-120 tokens
-- Confidence: 1.0 = user stated it directly, 0.7-0.9 = strongly implied, 0.3-0.6 = inferred
-- It's fine to extract nothing if the conversation has no durable information
-
-{existing_context}"""
-
-    try:
-        response = anthropic_client.messages.create(
-            model=settings.intent_model,
-            max_tokens=2048,
-            system=system_prompt,
-            tools=CONSOLIDATION_TOOLS,
-            messages=[{"role": "user", "content": f"Here is the conversation to consolidate:\n\n{conversation_text}"}],
-        )
-
-        # Process tool calls
-        for block in response.content:
-            if block.type == "tool_use":
-                _process_consolidation_tool(
-                    tool_name=block.name,
-                    tool_input=block.input,
-                    user=user,
-                    session_id=session_id,
-                    db=db,
-                )
-
-        db.commit()
-        logger.info(f"Consolidation complete for session {session_id}")
-
-    except Exception as e:
-        logger.error(f"Consolidation failed for session {session_id}: {e}", exc_info=True)
+        parts.append("## Existing hypotheses:\n" + "\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def _format_conversation_for_consolidation(messages) -> str:
-    """Format conversation messages into readable text for the consolidator."""
     lines = []
     for msg in messages:
         try:
@@ -353,7 +517,6 @@ def _format_conversation_for_consolidation(messages) -> str:
         role = "User" if msg.role == "user" else "Assistant"
 
         if isinstance(content, list):
-            # Extract text blocks, skip tool_use/tool_result details
             text_parts = []
             for block in content:
                 if isinstance(block, dict):
@@ -374,10 +537,10 @@ def _format_conversation_for_consolidation(messages) -> str:
 
 
 def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, session_id: str, db: Session):
-    """Process a single tool call from the consolidation LLM."""
+    """Process a single tool call from the consolidation LLM. No commit — caller handles transaction."""
     try:
         if tool_name == "save_profile_fact":
-            # Check for near-duplicates
+            # Duplicate check
             existing = db.query(ProfileMemory).filter(
                 ProfileMemory.user_id == user.id,
                 ProfileMemory.status == "active",
@@ -387,7 +550,7 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
                 logger.info(f"Skipping duplicate profile fact: {tool_input['content'][:60]}")
                 return
 
-            mem = ProfileMemory(
+            db.add(ProfileMemory(
                 user_id=user.id,
                 content=tool_input["content"],
                 category=tool_input.get("category", "General"),
@@ -396,37 +559,62 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
                 tags=",".join(tool_input.get("tags", [])),
                 source_session_id=session_id,
                 last_confirmed=datetime.now(timezone.utc),
-            )
-            db.add(mem)
-            logger.info(f"Saved profile fact: {tool_input['content'][:60]}")
+            ))
 
         elif tool_name == "save_episode":
-            mem = EpisodicMemory(
+            # Duplicate check for episodes
+            existing = db.query(EpisodicMemory).filter(
+                EpisodicMemory.user_id == user.id,
+                EpisodicMemory.status == "active",
+                EpisodicMemory.summary.ilike(f"%{tool_input['summary'][:50]}%"),
+            ).first()
+            if existing:
+                # Update recurrence instead of duplicating
+                existing.recurrence_count += 1
+                existing.updated_at = datetime.now(timezone.utc)
+                logger.info(f"Incremented episode recurrence: {tool_input['summary'][:60]}")
+                return
+
+            db.add(EpisodicMemory(
                 user_id=user.id,
                 summary=tool_input["summary"],
                 importance=tool_input.get("importance", 0.5),
                 tags=",".join(tool_input.get("tags", [])),
                 source_session_ids=json.dumps([session_id]),
                 time_start=datetime.now(timezone.utc),
-            )
-            db.add(mem)
-            logger.info(f"Saved episode: {tool_input['summary'][:60]}")
+            ))
 
         elif tool_name == "propose_hypothesis":
-            mem = HypothesisMemory(
+            # Duplicate check for hypotheses
+            existing = db.query(HypothesisMemory).filter(
+                HypothesisMemory.user_id == user.id,
+                HypothesisMemory.status.in_(["provisional", "active"]),
+                or_(
+                    HypothesisMemory.short_summary.ilike(f"%{tool_input['short_summary'][:40]}%"),
+                    HypothesisMemory.long_summary.ilike(f"%{tool_input['short_summary'][:40]}%"),
+                ),
+            ).first()
+            if existing:
+                # Treat as supporting evidence
+                existing.evidence_for += 1
+                existing.last_confirmed = datetime.now(timezone.utc)
+                _update_hypothesis_confidence(existing)
+                logger.info(f"Strengthened existing hypothesis: {existing.short_summary[:60]}")
+                return
+
+            db.add(HypothesisMemory(
                 user_id=user.id,
                 short_summary=tool_input["short_summary"],
                 long_summary=tool_input["long_summary"],
-                confidence=0.3,  # always starts low
+                confidence=0.3,
                 evidence_for=1,
                 evidence_against=0,
                 category=tool_input.get("category"),
                 tags=",".join(tool_input.get("tags", [])),
                 source_session_ids=json.dumps([session_id]),
                 status="provisional",
-            )
-            db.add(mem)
-            logger.info(f"Proposed hypothesis: {tool_input['short_summary'][:60]}")
+                # last_confirmed intentionally NULL — not yet confirmed
+            ))
 
         elif tool_name == "update_hypothesis":
             hyp_id = tool_input.get("hypothesis_id")
@@ -435,32 +623,13 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
                 HypothesisMemory.user_id == user.id,
             ).first()
             if hypothesis:
-                supports = tool_input.get("supports", True)
-                if supports:
+                if tool_input.get("supports", True):
                     hypothesis.evidence_for += 1
                     hypothesis.last_confirmed = datetime.now(timezone.utc)
                 else:
                     hypothesis.evidence_against += 1
+                _update_hypothesis_confidence(hypothesis)
 
-                # Update confidence
-                total = hypothesis.evidence_for + hypothesis.evidence_against
-                base = hypothesis.evidence_for / total if total > 0 else 0.5
-
-                # Decay: reduce if not confirmed recently
-                if hypothesis.last_confirmed:
-                    days_since = (datetime.now(timezone.utc) - hypothesis.last_confirmed).days
-                    decay = max(0.5, 1.0 - (days_since / 180))
-                else:
-                    decay = 0.8
-                hypothesis.confidence = round(base * decay, 2)
-
-                # Status transitions
-                if hypothesis.confidence >= 0.7 and hypothesis.evidence_for >= 4:
-                    hypothesis.status = "active"
-                elif hypothesis.confidence < 0.3:
-                    hypothesis.status = "challenged"
-
-                # Append session to source list
                 try:
                     sessions = json.loads(hypothesis.source_session_ids or "[]")
                 except (json.JSONDecodeError, TypeError):
@@ -468,8 +637,6 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
                 if session_id not in sessions:
                     sessions.append(session_id)
                     hypothesis.source_session_ids = json.dumps(sessions)
-
-                logger.info(f"Updated hypothesis {hyp_id}: confidence={hypothesis.confidence}, status={hypothesis.status}")
 
         elif tool_name == "update_profile_fact":
             old_id = tool_input.get("old_fact_id")
@@ -479,8 +646,6 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
             ).first()
             if old_fact:
                 old_fact.status = "outdated"
-                old_fact.superseded_by_id = None  # will be set after new one is created
-
                 new_mem = ProfileMemory(
                     user_id=user.id,
                     content=tool_input["new_content"],
@@ -492,103 +657,176 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
                     last_confirmed=datetime.now(timezone.utc),
                 )
                 db.add(new_mem)
-                db.flush()  # get the new ID
+                db.flush()
                 old_fact.superseded_by_id = new_mem.id
-                logger.info(f"Superseded profile fact {old_id} with: {tool_input['new_content'][:60]}")
 
     except Exception as e:
         logger.error(f"Error processing consolidation tool {tool_name}: {e}", exc_info=True)
 
 
+def _update_hypothesis_confidence(hypothesis):
+    """Recalculate hypothesis confidence from evidence counts + decay."""
+    total = hypothesis.evidence_for + hypothesis.evidence_against
+    base = hypothesis.evidence_for / total if total > 0 else 0.5
+
+    if hypothesis.last_confirmed:
+        days_since = (datetime.now(timezone.utc) - hypothesis.last_confirmed).days
+        decay = max(0.5, 1.0 - (days_since / 180))
+    else:
+        decay = 0.8
+
+    hypothesis.confidence = round(base * decay, 2)
+
+    if hypothesis.confidence >= 0.7 and hypothesis.evidence_for >= 4:
+        hypothesis.status = "active"
+    elif hypothesis.confidence < 0.3:
+        hypothesis.status = "challenged"
+
+
+# ─── Session Summaries ───────────────────────────────────────
+
+def should_generate_summary(user: User, session_id: str, db: Session) -> bool:
+    """Check if we should generate a new session summary."""
+    latest_summary = (
+        db.query(SessionSummary)
+        .filter(SessionSummary.user_id == user.id, SessionSummary.session_id == session_id)
+        .order_by(SessionSummary.created_at.desc())
+        .first()
+    )
+
+    since_id = latest_summary.message_id_end if latest_summary else 0
+
+    new_count = db.query(ConversationMessage).filter(
+        ConversationMessage.user_id == user.id,
+        ConversationMessage.session_id == session_id,
+        ConversationMessage.id > since_id,
+    ).count()
+
+    return new_count >= SUMMARY_MESSAGE_INTERVAL
+
+
+def generate_session_summary(user: User, session_id: str, db: Session):
+    """Generate a compressed summary of recent conversation for medium-term context."""
+    latest_summary = (
+        db.query(SessionSummary)
+        .filter(SessionSummary.user_id == user.id, SessionSummary.session_id == session_id)
+        .order_by(SessionSummary.created_at.desc())
+        .first()
+    )
+
+    since_id = latest_summary.message_id_end if latest_summary else 0
+    prior_summary = latest_summary.summary if latest_summary else None
+
+    messages = (
+        db.query(ConversationMessage)
+        .filter(
+            ConversationMessage.user_id == user.id,
+            ConversationMessage.session_id == session_id,
+            ConversationMessage.id > since_id,
+        )
+        .order_by(ConversationMessage.created_at.asc())
+        .limit(CONSOLIDATION_MAX_INPUT_MESSAGES)
+        .all()
+    )
+
+    if len(messages) < 4:
+        return
+
+    conversation_text = _format_conversation_for_consolidation(messages)
+    max_id = max(m.id for m in messages)
+    min_id = min(m.id for m in messages)
+
+    prior_context = ""
+    if prior_summary:
+        prior_context = f"\n\nPrevious conversation summary:\n{prior_summary}\n\nNow summarize the NEW messages below, building on the previous summary:"
+
+    system = f"""You are a conversation summarizer. Create a concise summary (200-300 tokens) that captures:
+- Key topics discussed
+- Decisions made or actions taken
+- Important context for continuing the conversation
+- The user's current mood/state if apparent
+
+Keep it factual and concise. This will be injected as context for future messages.{prior_context}"""
+
+    try:
+        response = _background_llm_call(
+            system=system,
+            user_content=conversation_text,
+            max_tokens=500,
+        )
+
+        summary_text = response.choices[0].message.content if response.choices else None
+        if summary_text:
+            db.add(SessionSummary(
+                user_id=user.id,
+                session_id=session_id,
+                summary=summary_text,
+                message_id_start=min_id,
+                message_id_end=max_id,
+                message_count=len(messages),
+            ))
+            db.commit()
+            logger.info(f"Generated session summary for {session_id}: {len(summary_text)} chars")
+
+    except Exception as e:
+        logger.error(f"Session summary failed for {session_id}: {e}", exc_info=True)
+
+
 # ─── Memory Management ──────────────────────────────────────
 
 def search_memories(user: User, query: str, db: Session, module: str = None) -> str:
-    """Search across all memory modules. Returns formatted results."""
     results = []
-
     if not module or module == "profile":
         pattern = f"%{query}%"
-        profiles = db.query(ProfileMemory).filter(
-            ProfileMemory.user_id == user.id,
-            ProfileMemory.status == "active",
-            or_(
-                ProfileMemory.content.ilike(pattern),
-                ProfileMemory.tags.ilike(pattern),
-            ),
-        ).limit(10).all()
-        for p in profiles:
+        for p in db.query(ProfileMemory).filter(
+            ProfileMemory.user_id == user.id, ProfileMemory.status == "active",
+            or_(ProfileMemory.content.ilike(pattern), ProfileMemory.tags.ilike(pattern)),
+        ).limit(10).all():
             results.append(f"[Profile | {p.category}] {p.content}")
 
     if not module or module == "episodic":
         pattern = f"%{query}%"
-        episodes = db.query(EpisodicMemory).filter(
-            EpisodicMemory.user_id == user.id,
-            EpisodicMemory.status == "active",
-            or_(
-                EpisodicMemory.summary.ilike(pattern),
-                EpisodicMemory.tags.ilike(pattern),
-            ),
-        ).limit(10).all()
-        for e in episodes:
+        for e in db.query(EpisodicMemory).filter(
+            EpisodicMemory.user_id == user.id, EpisodicMemory.status == "active",
+            or_(EpisodicMemory.summary.ilike(pattern), EpisodicMemory.tags.ilike(pattern)),
+        ).limit(10).all():
             results.append(f"[Episode] {e.summary}")
 
     if not module or module == "hypothesis":
         pattern = f"%{query}%"
-        hypotheses = db.query(HypothesisMemory).filter(
+        for h in db.query(HypothesisMemory).filter(
             HypothesisMemory.user_id == user.id,
             HypothesisMemory.status.in_(["provisional", "active"]),
-            or_(
-                HypothesisMemory.short_summary.ilike(pattern),
-                HypothesisMemory.long_summary.ilike(pattern),
-                HypothesisMemory.tags.ilike(pattern),
-            ),
-        ).limit(10).all()
-        for h in hypotheses:
+            or_(HypothesisMemory.short_summary.ilike(pattern), HypothesisMemory.long_summary.ilike(pattern), HypothesisMemory.tags.ilike(pattern)),
+        ).limit(10).all():
             results.append(f"[Hypothesis | confidence:{h.confidence}] {h.short_summary}")
 
     if not results:
         return f"No memories found matching '{query}'."
-
     return f"{len(results)} memory(ies) found:\n" + "\n".join(f"- {r}" for r in results)
 
 
 def correct_belief(user: User, belief_summary: str, correction: str, db: Session) -> str:
-    """User corrects a system belief. Searches and updates/supersedes matching memories."""
     pattern = f"%{belief_summary}%"
-
-    # Check hypotheses first
     hypothesis = db.query(HypothesisMemory).filter(
         HypothesisMemory.user_id == user.id,
         HypothesisMemory.status.in_(["provisional", "active"]),
-        or_(
-            HypothesisMemory.short_summary.ilike(pattern),
-            HypothesisMemory.long_summary.ilike(pattern),
-        ),
+        or_(HypothesisMemory.short_summary.ilike(pattern), HypothesisMemory.long_summary.ilike(pattern)),
     ).first()
-
     if hypothesis:
         hypothesis.status = "superseded"
         db.commit()
         return f"Corrected: hypothesis '{hypothesis.short_summary}' has been superseded. Noted: {correction}"
 
-    # Check profile memories
     profile = db.query(ProfileMemory).filter(
-        ProfileMemory.user_id == user.id,
-        ProfileMemory.status == "active",
+        ProfileMemory.user_id == user.id, ProfileMemory.status == "active",
         ProfileMemory.content.ilike(pattern),
     ).first()
-
     if profile:
         profile.status = "outdated"
-        new_mem = ProfileMemory(
-            user_id=user.id,
-            content=correction,
-            category=profile.category,
-            confidence=1.0,
-            source="explicit",
-            tags=profile.tags,
-            last_confirmed=datetime.now(timezone.utc),
-        )
+        new_mem = ProfileMemory(user_id=user.id, content=correction, category=profile.category,
+                                confidence=1.0, source="explicit", tags=profile.tags,
+                                last_confirmed=datetime.now(timezone.utc))
         db.add(new_mem)
         db.flush()
         profile.superseded_by_id = new_mem.id
@@ -600,50 +838,25 @@ def correct_belief(user: User, belief_summary: str, correction: str, db: Session
 
 
 def forget_memory(user: User, memory_description: str, db: Session) -> str:
-    """Remove a specific memory. Cascades to hypotheses built on it."""
     pattern = f"%{memory_description}%"
     deleted = []
-
-    # Check profiles
-    profiles = db.query(ProfileMemory).filter(
-        ProfileMemory.user_id == user.id,
-        ProfileMemory.status == "active",
-        ProfileMemory.content.ilike(pattern),
-    ).all()
-    for p in profiles:
+    for p in db.query(ProfileMemory).filter(ProfileMemory.user_id == user.id, ProfileMemory.status == "active", ProfileMemory.content.ilike(pattern)).all():
         p.status = "deleted"
         deleted.append(f"profile: {p.content[:60]}")
-
-    # Check episodes
-    episodes = db.query(EpisodicMemory).filter(
-        EpisodicMemory.user_id == user.id,
-        EpisodicMemory.status == "active",
-        EpisodicMemory.summary.ilike(pattern),
-    ).all()
-    for e in episodes:
+    for e in db.query(EpisodicMemory).filter(EpisodicMemory.user_id == user.id, EpisodicMemory.status == "active", EpisodicMemory.summary.ilike(pattern)).all():
         e.status = "archived"
         deleted.append(f"episode: {e.summary[:60]}")
-
-    # Check hypotheses
-    hypotheses = db.query(HypothesisMemory).filter(
-        HypothesisMemory.user_id == user.id,
-        HypothesisMemory.status.in_(["provisional", "active"]),
-        or_(
-            HypothesisMemory.short_summary.ilike(pattern),
-            HypothesisMemory.long_summary.ilike(pattern),
-        ),
-    ).all()
-    for h in hypotheses:
+    for h in db.query(HypothesisMemory).filter(HypothesisMemory.user_id == user.id, HypothesisMemory.status.in_(["provisional", "active"]),
+                                                or_(HypothesisMemory.short_summary.ilike(pattern), HypothesisMemory.long_summary.ilike(pattern))).all():
         h.status = "superseded"
         deleted.append(f"hypothesis: {h.short_summary[:60]}")
-
     db.commit()
-
     if not deleted:
         return f"No memories found matching '{memory_description}'."
-
     return f"Forgotten {len(deleted)} memory(ies):\n" + "\n".join(f"- {d}" for d in deleted)
 
+
+# ─── Decay ───────────────────────────────────────────────────
 
 def decay_old_memories(user: User, db: Session):
     """Decay episodic importance and hypothesis confidence for old unconfirmed memories."""
@@ -661,14 +874,21 @@ def decay_old_memories(user: User, db: Session):
         if ep.importance < 0.1:
             ep.status = "decayed"
 
-    # Decay hypothesis confidence
+    # Decay hypothesis confidence — including NULL last_confirmed (never confirmed)
     old_hypotheses = db.query(HypothesisMemory).filter(
         HypothesisMemory.user_id == user.id,
         HypothesisMemory.status.in_(["provisional", "active"]),
-        HypothesisMemory.last_confirmed < cutoff,
+        or_(
+            HypothesisMemory.last_confirmed.is_(None),
+            HypothesisMemory.last_confirmed < cutoff,
+        ),
     ).all()
     for hyp in old_hypotheses:
-        days_since = (datetime.now(timezone.utc) - hyp.last_confirmed).days
+        if hyp.last_confirmed:
+            days_since = (datetime.now(timezone.utc) - hyp.last_confirmed).days
+        else:
+            # Never confirmed — use created_at for decay calculation
+            days_since = (datetime.now(timezone.utc) - hyp.created_at).days if hyp.created_at else 180
         decay = max(0.5, 1.0 - (days_since / 180))
         base = hyp.evidence_for / (hyp.evidence_for + hyp.evidence_against) if (hyp.evidence_for + hyp.evidence_against) > 0 else 0.5
         hyp.confidence = round(base * decay, 2)
@@ -681,289 +901,144 @@ def decay_old_memories(user: User, db: Session):
 
 # ─── Compaction ──────────────────────────────────────────────
 
-COMPACTION_THRESHOLD = 30  # run compaction when a module exceeds this many active records
-
-
 def compact_memories(user: User, db: Session):
-    """
-    Compact the memory store: merge duplicates, absorb near-duplicates,
-    archive low-value memories. Uses one LLM call per module that needs it.
-    """
+    """Compact memory store: merge duplicates, archive low-value. Uses background model."""
     stats = {"profiles": 0, "episodes": 0, "hypotheses": 0}
 
-    # Check if compaction is needed
-    profile_count = db.query(ProfileMemory).filter(
-        ProfileMemory.user_id == user.id,
-        ProfileMemory.status == "active",
-    ).count()
-
-    episode_count = db.query(EpisodicMemory).filter(
-        EpisodicMemory.user_id == user.id,
-        EpisodicMemory.status == "active",
-    ).count()
-
-    hypothesis_count = db.query(HypothesisMemory).filter(
-        HypothesisMemory.user_id == user.id,
-        HypothesisMemory.status.in_(["provisional", "active"]),
-    ).count()
+    profile_count = db.query(ProfileMemory).filter(ProfileMemory.user_id == user.id, ProfileMemory.status == "active").count()
+    episode_count = db.query(EpisodicMemory).filter(EpisodicMemory.user_id == user.id, EpisodicMemory.status == "active").count()
+    hypothesis_count = db.query(HypothesisMemory).filter(HypothesisMemory.user_id == user.id, HypothesisMemory.status.in_(["provisional", "active"])).count()
 
     if profile_count > COMPACTION_THRESHOLD:
-        stats["profiles"] = _compact_profiles(user, db)
-
+        stats["profiles"] = _compact_module(user, db, "profile")
     if episode_count > COMPACTION_THRESHOLD:
-        stats["episodes"] = _compact_episodes(user, db)
-
+        stats["episodes"] = _compact_module(user, db, "episode")
     if hypothesis_count > COMPACTION_THRESHOLD:
-        stats["hypotheses"] = _compact_hypotheses(user, db)
+        stats["hypotheses"] = _compact_module(user, db, "hypothesis")
 
     logger.info(f"Compaction complete: {stats}")
     return stats
 
 
-def _compact_profiles(user: User, db: Session) -> int:
-    """Merge redundant profile facts via LLM."""
-    profiles = db.query(ProfileMemory).filter(
-        ProfileMemory.user_id == user.id,
-        ProfileMemory.status == "active",
-    ).order_by(ProfileMemory.created_at.asc()).all()
+def _compact_module(user: User, db: Session, module: str) -> int:
+    """Generic compaction for any memory module."""
+    if module == "profile":
+        items = db.query(ProfileMemory).filter(ProfileMemory.user_id == user.id, ProfileMemory.status == "active").order_by(ProfileMemory.created_at.asc()).all()
+        lines = [f"[ID:{p.id}] [{p.category}] {p.content} (confidence:{p.confidence}, source:{p.source})" for p in items]
+    elif module == "episode":
+        items = db.query(EpisodicMemory).filter(EpisodicMemory.user_id == user.id, EpisodicMemory.status == "active").order_by(EpisodicMemory.created_at.asc()).all()
+        lines = [f"[ID:{e.id}] {e.summary} (importance:{e.importance}, recurrence:{e.recurrence_count})" for e in items]
+    elif module == "hypothesis":
+        items = db.query(HypothesisMemory).filter(HypothesisMemory.user_id == user.id, HypothesisMemory.status.in_(["provisional", "active"])).order_by(HypothesisMemory.created_at.asc()).all()
+        lines = [f"[ID:{h.id}] {h.short_summary} (confidence:{h.confidence}, for:{h.evidence_for}, against:{h.evidence_against})" for h in items]
+    else:
+        return 0
 
-    # Format for LLM
-    lines = [f"[ID:{p.id}] [{p.category}] {p.content} (confidence:{p.confidence}, source:{p.source})" for p in profiles]
+    system = f"""You are a memory compaction system. Review these {module} memories and identify:
+1. DUPLICATES or NEAR-DUPLICATES to merge
+2. CONTRADICTIONS (newer wins)
+3. LOW-VALUE entries to remove
 
-    response = anthropic_client.messages.create(
-        model=settings.intent_model,
-        max_tokens=4096,
-        system="""You are a memory compaction system. You receive a list of profile facts about a user.
+Return a JSON array of actions:
+- {{"action": "merge", "keep_id": <id>, "remove_ids": [<ids>], "merged_content": "<combined>"}}
+- {{"action": "remove", "id": <id>, "reason": "duplicate|trivial|outdated"}}
 
-Your job:
-1. Identify DUPLICATE or NEAR-DUPLICATE facts (same information stated differently)
-2. Identify CONTRADICTORY facts (newer one should win)
-3. Identify facts that can be MERGED into a single richer fact
-4. Identify LOW-VALUE facts that are too trivial to keep
+Be conservative. Return [] if nothing needs compacting."""
 
-For each action, output a JSON object. Return a JSON array of actions.
+    try:
+        response = _background_llm_call(
+            system=system,
+            user_content=f"Here are {len(items)} {module} memories:\n\n" + "\n".join(lines),
+            max_tokens=4096,
+        )
 
-Action types:
-- {"action": "merge", "keep_id": <id>, "remove_ids": [<ids>], "merged_content": "<combined content>"}
-- {"action": "remove", "id": <id>, "reason": "duplicate|trivial|outdated"}
+        text = response.choices[0].message.content if response.choices else "[]"
+        actions = _parse_json_array(text)
+        removed = 0
 
-Rules:
-- When merging, prefer the HIGHER confidence and MORE RECENT fact as the keeper
-- Never remove a fact with source "explicit" unless it's truly duplicated
-- Be conservative — only act on clear duplicates/contradictions, not vague similarity
-- Return [] if nothing needs compacting""",
-        messages=[{"role": "user", "content": f"Here are {len(profiles)} profile facts to review:\n\n" + "\n".join(lines)}],
-    )
-
-    # Parse response
-    actions = _parse_compaction_response(response)
-    removed = 0
-
-    for action in actions:
-        try:
-            if action.get("action") == "merge":
-                keep_id = action["keep_id"]
-                remove_ids = action.get("remove_ids", [])
-                merged_content = action.get("merged_content")
-
-                keeper = db.query(ProfileMemory).filter(ProfileMemory.id == keep_id).first()
-                if keeper and merged_content:
-                    keeper.content = merged_content
-                    keeper.updated_at = datetime.now(timezone.utc)
-
-                for rid in remove_ids:
-                    victim = db.query(ProfileMemory).filter(ProfileMemory.id == rid).first()
-                    if victim:
-                        victim.status = "outdated"
-                        victim.superseded_by_id = keep_id
-                        removed += 1
-
-            elif action.get("action") == "remove":
-                rid = action["id"]
-                victim = db.query(ProfileMemory).filter(ProfileMemory.id == rid).first()
-                if victim:
-                    victim.status = "outdated"
-                    removed += 1
-        except Exception as e:
-            logger.warning(f"Compaction action failed: {e}")
-
-    db.commit()
-    logger.info(f"Profile compaction: {removed} facts removed/merged from {len(profiles)}")
-    return removed
-
-
-def _compact_episodes(user: User, db: Session) -> int:
-    """Merge related episodes and archive old low-importance ones."""
-    episodes = db.query(EpisodicMemory).filter(
-        EpisodicMemory.user_id == user.id,
-        EpisodicMemory.status == "active",
-    ).order_by(EpisodicMemory.created_at.asc()).all()
-
-    lines = [f"[ID:{e.id}] {e.summary} (importance:{e.importance}, recurrence:{e.recurrence_count}, created:{e.created_at.strftime('%Y-%m-%d') if e.created_at else 'unknown'})" for e in episodes]
-
-    response = anthropic_client.messages.create(
-        model=settings.intent_model,
-        max_tokens=4096,
-        system="""You are a memory compaction system. You receive a list of episodic memories (events/situations).
-
-Your job:
-1. Identify episodes that describe the SAME EVENT or RECURRING SITUATION and should be merged
-2. Identify episodes that are too old and trivial to keep (low importance, no recurrence)
-
-Action types:
-- {"action": "merge", "keep_id": <id>, "remove_ids": [<ids>], "merged_summary": "<combined summary>", "new_recurrence": <count>}
-- {"action": "archive", "id": <id>, "reason": "trivial|outdated|resolved"}
-
-Rules:
-- Merge episodes about the same recurring situation into one with higher recurrence count
-- Archive episodes older than 3 months with importance < 0.3 and recurrence = 1
-- Be conservative — keep anything that might provide useful context
-- Return [] if nothing needs compacting""",
-        messages=[{"role": "user", "content": f"Here are {len(episodes)} episodes to review:\n\n" + "\n".join(lines)}],
-    )
-
-    actions = _parse_compaction_response(response)
-    removed = 0
-
-    for action in actions:
-        try:
-            if action.get("action") == "merge":
-                keep_id = action["keep_id"]
-                remove_ids = action.get("remove_ids", [])
-                merged_summary = action.get("merged_summary")
-                new_recurrence = action.get("new_recurrence", 1)
-
-                keeper = db.query(EpisodicMemory).filter(EpisodicMemory.id == keep_id).first()
-                if keeper:
-                    if merged_summary:
-                        keeper.summary = merged_summary
-                    keeper.recurrence_count = new_recurrence
-                    keeper.updated_at = datetime.now(timezone.utc)
-
-                for rid in remove_ids:
-                    victim = db.query(EpisodicMemory).filter(EpisodicMemory.id == rid).first()
-                    if victim:
-                        victim.status = "archived"
-                        removed += 1
-
-            elif action.get("action") == "archive":
-                rid = action["id"]
-                victim = db.query(EpisodicMemory).filter(EpisodicMemory.id == rid).first()
-                if victim:
-                    victim.status = "archived"
-                    removed += 1
-        except Exception as e:
-            logger.warning(f"Episode compaction action failed: {e}")
-
-    db.commit()
-    logger.info(f"Episode compaction: {removed} episodes archived/merged from {len(episodes)}")
-    return removed
-
-
-def _compact_hypotheses(user: User, db: Session) -> int:
-    """Merge overlapping hypotheses and archive weak ones."""
-    hypotheses = db.query(HypothesisMemory).filter(
-        HypothesisMemory.user_id == user.id,
-        HypothesisMemory.status.in_(["provisional", "active"]),
-    ).order_by(HypothesisMemory.created_at.asc()).all()
-
-    lines = [f"[ID:{h.id}] {h.short_summary} | {h.long_summary} (confidence:{h.confidence}, for:{h.evidence_for}, against:{h.evidence_against}, status:{h.status})" for h in hypotheses]
-
-    response = anthropic_client.messages.create(
-        model=settings.intent_model,
-        max_tokens=4096,
-        system="""You are a memory compaction system. You receive a list of hypotheses about user behavior.
-
-Your job:
-1. Identify hypotheses that describe the SAME PATTERN and should be merged
-2. Identify hypotheses that CONTRADICT each other — keep the one with more evidence
-3. Identify hypotheses with very low confidence and no recent evidence that should be dropped
-
-Action types:
-- {"action": "merge", "keep_id": <id>, "remove_ids": [<ids>], "merged_short": "<summary>", "merged_long": "<detail>", "combined_evidence_for": <n>, "combined_evidence_against": <n>}
-- {"action": "supersede", "winner_id": <id>, "loser_id": <id>, "reason": "contradiction"}
-- {"action": "drop", "id": <id>, "reason": "weak|stale|unfounded"}
-
-Rules:
-- When merging, combine evidence counts
-- When hypotheses contradict, the one with higher evidence_for wins
-- Only drop hypotheses with confidence < 0.25 and evidence_for <= 1
-- Be conservative — uncertain hypotheses that haven't been disproven yet should stay
-- Return [] if nothing needs compacting""",
-        messages=[{"role": "user", "content": f"Here are {len(hypotheses)} hypotheses to review:\n\n" + "\n".join(lines)}],
-    )
-
-    actions = _parse_compaction_response(response)
-    removed = 0
-
-    for action in actions:
-        try:
-            if action.get("action") == "merge":
-                keep_id = action["keep_id"]
-                keeper = db.query(HypothesisMemory).filter(HypothesisMemory.id == keep_id).first()
-                if keeper:
-                    if action.get("merged_short"):
-                        keeper.short_summary = action["merged_short"]
-                    if action.get("merged_long"):
-                        keeper.long_summary = action["merged_long"]
-                    keeper.evidence_for = action.get("combined_evidence_for", keeper.evidence_for)
-                    keeper.evidence_against = action.get("combined_evidence_against", keeper.evidence_against)
-                    total = keeper.evidence_for + keeper.evidence_against
-                    keeper.confidence = round(keeper.evidence_for / total, 2) if total > 0 else 0.3
-                    keeper.updated_at = datetime.now(timezone.utc)
-
-                for rid in action.get("remove_ids", []):
-                    victim = db.query(HypothesisMemory).filter(HypothesisMemory.id == rid).first()
-                    if victim:
-                        victim.status = "superseded"
-                        victim.superseded_by_id = keep_id
-                        removed += 1
-
-            elif action.get("action") == "supersede":
-                loser = db.query(HypothesisMemory).filter(HypothesisMemory.id == action["loser_id"]).first()
-                if loser:
-                    loser.status = "superseded"
-                    loser.superseded_by_id = action.get("winner_id")
-                    removed += 1
-
-            elif action.get("action") == "drop":
-                victim = db.query(HypothesisMemory).filter(HypothesisMemory.id == action["id"]).first()
-                if victim:
-                    victim.status = "superseded"
-                    removed += 1
-        except Exception as e:
-            logger.warning(f"Hypothesis compaction action failed: {e}")
-
-    db.commit()
-    logger.info(f"Hypothesis compaction: {removed} hypotheses removed/merged from {len(hypotheses)}")
-    return removed
-
-
-def _parse_compaction_response(response) -> list:
-    """Extract JSON array of actions from LLM response."""
-    for block in response.content:
-        if block.type == "text":
-            text = block.text.strip()
-            # Try to find JSON array in the response
+        for action in actions:
             try:
-                # Direct parse
-                return json.loads(text)
-            except json.JSONDecodeError:
-                pass
-            # Try extracting from markdown code block
-            import re
-            match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    pass
-            # Try finding array in text
-            match = re.search(r'\[.*\]', text, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(0))
-                except json.JSONDecodeError:
-                    pass
+                if action.get("action") == "merge":
+                    keep_id = action["keep_id"]
+                    for rid in action.get("remove_ids", []):
+                        _mark_memory_removed(db, module, rid, keep_id)
+                        removed += 1
+                elif action.get("action") == "remove":
+                    _mark_memory_removed(db, module, action["id"])
+                    removed += 1
+            except Exception as e:
+                logger.warning(f"Compaction action failed: {e}")
+
+        db.commit()
+        logger.info(f"{module} compaction: {removed} removed from {len(items)}")
+        return removed
+
+    except Exception as e:
+        logger.error(f"Compaction failed for {module}: {e}", exc_info=True)
+        return 0
+
+
+def _mark_memory_removed(db: Session, module: str, mem_id: int, superseded_by: int = None):
+    if module == "profile":
+        mem = db.query(ProfileMemory).filter(ProfileMemory.id == mem_id).first()
+        if mem:
+            mem.status = "outdated"
+            if superseded_by:
+                mem.superseded_by_id = superseded_by
+    elif module == "episode":
+        mem = db.query(EpisodicMemory).filter(EpisodicMemory.id == mem_id).first()
+        if mem:
+            mem.status = "archived"
+    elif module == "hypothesis":
+        mem = db.query(HypothesisMemory).filter(HypothesisMemory.id == mem_id).first()
+        if mem:
+            mem.status = "superseded"
+            if superseded_by:
+                mem.superseded_by_id = superseded_by
+
+
+def _parse_json_array(text: str) -> list:
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
     logger.warning("Could not parse compaction response as JSON array")
     return []
+
+
+# ─── Recovery Sweep ──────────────────────────────────────────
+
+def recovery_sweep(db: Session):
+    """Find sessions with unconsolidated messages and trigger consolidation."""
+    checkpoints = db.query(ConsolidationCheckpoint).filter(
+        ConsolidationCheckpoint.is_consolidating == False,
+    ).all()
+
+    for cp in checkpoints:
+        new_count = db.query(ConversationMessage).filter(
+            ConversationMessage.user_id == cp.user_id,
+            ConversationMessage.session_id == cp.session_id,
+            ConversationMessage.id > cp.last_consolidated_message_id,
+        ).count()
+
+        if new_count >= 4:
+            user = db.query(User).filter(User.id == cp.user_id).first()
+            if user:
+                logger.info(f"Recovery sweep: consolidating {cp.session_id} ({new_count} stranded messages)")
+                try:
+                    consolidate_session(user, cp.session_id, db)
+                except Exception as e:
+                    logger.error(f"Recovery consolidation failed for {cp.session_id}: {e}")
