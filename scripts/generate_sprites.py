@@ -188,16 +188,26 @@ def generate_sprite(name: str, config: dict, is_room: bool = False) -> bool:
 
 
 def remove_bg_chroma(img: Image.Image) -> Image.Image:
-    """Remove bright green background via chroma key."""
+    """Remove green background using HSV color space for better coverage."""
+    import colorsys
+
     data = img.getdata()
     new_data = []
     for pixel in data:
         r, g, b, a = pixel
-        # Check if pixel is close to bright green
-        if (abs(r - BG_COLOR[0]) < BG_TOLERANCE and
-            abs(g - BG_COLOR[1]) < BG_TOLERANCE and
-            abs(b - BG_COLOR[2]) < BG_TOLERANCE):
-            new_data.append((0, 0, 0, 0))  # transparent
+        # Convert to HSV
+        h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+        hue_deg = h * 360
+
+        # Green hue range: roughly 70-170 degrees
+        # Also catch desaturated greens and very bright/dark greens
+        is_green = (70 < hue_deg < 170) and (s > 0.15) and (v > 0.15)
+
+        # Also catch near-white and near-grey pixels at edges (anti-aliasing artifacts)
+        is_edge = (s < 0.1) and (v > 0.85)
+
+        if is_green or is_edge:
+            new_data.append((0, 0, 0, 0))
         else:
             new_data.append(pixel)
 

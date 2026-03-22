@@ -227,12 +227,23 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 
 @keyframes bob {
     0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-2px); }
+    50% { transform: translateY(-1px); }
 }
 
 @keyframes breathe {
-    0%, 100% { transform: scaleX(1); }
-    50% { transform: scaleX(1.05); }
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.02); }
+}
+
+@keyframes sway {
+    0%, 100% { transform: translateX(0); }
+    50% { transform: translateX(1px); }
+}
+
+@keyframes walk {
+    0%, 100% { transform: translateX(0) translateY(0); }
+    25% { transform: translateX(2px) translateY(-1px); }
+    75% { transform: translateX(-2px) translateY(-1px); }
 }
 
 @keyframes tailWag {
@@ -271,18 +282,18 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 .sleeping-z:nth-child(3) { animation-delay: 1.4s; font-size: 10px; }
 
 /* Activity-specific animations */
-.zeph-reading .zeph-sprite { animation: bob 3s ease-in-out infinite; }
-.zeph-sleeping .zeph-sprite { animation: breathe 4s ease-in-out infinite; opacity: 0.7; }
-.zeph-magic .zeph-sprite { animation: bob 1.5s ease-in-out infinite; }
-.zeph-walking .zeph-sprite { animation: bob 0.6s ease-in-out infinite; }
-.zeph-eating .zeph-sprite { animation: bob 2s ease-in-out infinite; }
-.zeph-writing .zeph-sprite { animation: bob 4s ease-in-out infinite; }
-.zeph-sitting .zeph-sprite { animation: breathe 5s ease-in-out infinite; }
+.zeph-reading .zeph-sprite { animation: sway 4s ease-in-out infinite; }
+.zeph-sleeping .zeph-sprite { animation: breathe 5s ease-in-out infinite; opacity: 0.8; }
+.zeph-magic .zeph-sprite { animation: bob 2s ease-in-out infinite; }
+.zeph-walking .zeph-sprite { animation: walk 1.2s ease-in-out infinite; }
+.zeph-eating .zeph-sprite { animation: sway 3s ease-in-out infinite; }
+.zeph-writing .zeph-sprite { animation: sway 5s ease-in-out infinite; }
+.zeph-sitting .zeph-sprite { animation: breathe 6s ease-in-out infinite; }
 
-.briar-sleeping .briar-sprite { animation: breathe 4s ease-in-out infinite; }
-.briar-sitting .briar-sprite { animation: breathe 5s ease-in-out infinite; }
-.briar-following .briar-sprite { animation: bob 0.8s ease-in-out infinite; }
-.briar-eating .briar-sprite { animation: bob 1.5s ease-in-out infinite; }
+.briar-sleeping .briar-sprite { animation: breathe 5s ease-in-out infinite; }
+.briar-sitting .briar-sprite { animation: breathe 6s ease-in-out infinite; }
+.briar-following .briar-sprite { animation: walk 1s ease-in-out infinite; }
+.briar-eating .briar-sprite { animation: sway 2.5s ease-in-out infinite; }
 
 /* When real sprites are loaded, hide CSS placeholder shapes */
 .has-sprite { background-color: transparent !important; }
@@ -382,16 +393,17 @@ const ROOM_FURNITURE = {
 };
 
 // Zeph positions per room
+// Positions: l=left px, b=bottom px (above info bar at 18px)
 const ZEPH_POS = {
-    study:   { reading: {l:38,b:42}, writing: {l:35,b:42}, magic: {l:140,b:42}, sleeping: {l:180,b:30}, sitting: {l:120,b:42}, eating: {l:50,b:42}, walking: {l:100,b:42} },
-    kitchen: { eating: {l:55,b:52}, reading: {l:90,b:52}, sitting: {l:85,b:52}, sleeping: {l:180,b:30}, writing: {l:55,b:52}, magic: {l:140,b:52}, walking: {l:100,b:52} },
-    outside: { walking: {l:100,b:42}, sitting: {l:90,b:42}, reading: {l:85,b:50}, magic: {l:60,b:50}, sleeping: {l:80,b:35}, eating: {l:70,b:42}, writing: {l:85,b:50} },
+    study:   { reading: {l:40,b:22}, writing: {l:35,b:22}, magic: {l:140,b:22}, sleeping: {l:160,b:20}, sitting: {l:120,b:22}, eating: {l:50,b:22}, walking: {l:100,b:22} },
+    kitchen: { eating: {l:50,b:22}, reading: {l:90,b:22}, sitting: {l:85,b:22}, sleeping: {l:160,b:20}, writing: {l:50,b:22}, magic: {l:140,b:22}, walking: {l:100,b:22} },
+    outside: { walking: {l:110,b:22}, sitting: {l:90,b:22}, reading: {l:85,b:22}, magic: {l:70,b:22}, sleeping: {l:80,b:20}, eating: {l:70,b:22}, writing: {l:85,b:22} },
 };
 
 const BRIAR_POS = {
-    study:   { sleeping: {l:150,b:28}, sitting: {l:120,b:28}, following: {l:80,b:28} },
-    kitchen: { sleeping: {l:140,b:38}, sitting: {l:100,b:38}, following: {l:70,b:38}, eating: {l:120,b:38} },
-    outside: { sleeping: {l:130,b:35}, sitting: {l:120,b:35}, following: {l:140,b:35} },
+    study:   { sleeping: {l:180,b:22}, sitting: {l:170,b:22}, following: {l:100,b:22} },
+    kitchen: { sleeping: {l:170,b:22}, sitting: {l:160,b:22}, following: {l:100,b:22}, eating: {l:150,b:22} },
+    outside: { sleeping: {l:170,b:22}, sitting: {l:165,b:22}, following: {l:160,b:22} },
 };
 
 function generateStars() {
