@@ -394,16 +394,21 @@ const ROOM_FURNITURE = {
 
 // Zeph positions per room
 // Positions: l=left px, b=bottom px (above info bar at 18px)
+// Mapped to actual walkable areas in each background:
+//   Study: floor area across bottom, desk center-left, bookshelf right
+//   Kitchen: floor area, chair/table center-left, fireplace right
+//   Outside day: grass RIGHT side near tower (x:200+) and LEFT cliff (x:20-80), water in center!
+//   Outside night: path center-bottom (x:100-200), near tower (x:80-150)
 const ZEPH_POS = {
-    study:   { reading: {l:40,b:22}, writing: {l:35,b:22}, magic: {l:140,b:22}, sleeping: {l:160,b:20}, sitting: {l:120,b:22}, eating: {l:50,b:22}, walking: {l:100,b:22} },
-    kitchen: { eating: {l:50,b:22}, reading: {l:90,b:22}, sitting: {l:85,b:22}, sleeping: {l:160,b:20}, writing: {l:50,b:22}, magic: {l:140,b:22}, walking: {l:100,b:22} },
-    outside: { walking: {l:110,b:22}, sitting: {l:90,b:22}, reading: {l:85,b:22}, magic: {l:70,b:22}, sleeping: {l:80,b:20}, eating: {l:70,b:22}, writing: {l:85,b:22} },
+    study:   { reading: {l:60,b:22}, writing: {l:50,b:22}, magic: {l:180,b:22}, sleeping: {l:140,b:20}, sitting: {l:100,b:22}, eating: {l:70,b:22}, walking: {l:120,b:22} },
+    kitchen: { eating: {l:120,b:22}, reading: {l:60,b:22}, sitting: {l:80,b:22}, sleeping: {l:50,b:20}, writing: {l:120,b:22}, magic: {l:180,b:22}, walking: {l:100,b:22} },
+    outside: { walking: {l:210,b:22}, sitting: {l:220,b:22}, reading: {l:230,b:22}, magic: {l:40,b:35}, sleeping: {l:220,b:20}, eating: {l:215,b:22}, writing: {l:225,b:22} },
 };
 
 const BRIAR_POS = {
-    study:   { sleeping: {l:180,b:22}, sitting: {l:170,b:22}, following: {l:100,b:22} },
-    kitchen: { sleeping: {l:170,b:22}, sitting: {l:160,b:22}, following: {l:100,b:22}, eating: {l:150,b:22} },
-    outside: { sleeping: {l:170,b:22}, sitting: {l:165,b:22}, following: {l:160,b:22} },
+    study:   { sleeping: {l:200,b:22}, sitting: {l:190,b:22}, following: {l:130,b:22} },
+    kitchen: { sleeping: {l:180,b:22}, sitting: {l:50,b:22}, following: {l:160,b:22}, eating: {l:170,b:22} },
+    outside: { sleeping: {l:230,b:22}, sitting: {l:240,b:22}, following: {l:250,b:22} },
 };
 
 function generateStars() {
