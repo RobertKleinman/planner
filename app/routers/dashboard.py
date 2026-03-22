@@ -21,7 +21,7 @@ import logging
 
 from app.database import get_db
 from app.auth import hash_api_key
-from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, NotificationContact, MemoTopic, MemoTopicEntry
+from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, NotificationContact, MemoTopic, MemoTopicEntry, Reminder
 from app.services.google_auth import get_calendar_service
 from app.modules.memo import handle_memo
 from app.services import assistant as assistant_service
@@ -648,6 +648,19 @@ async def delete_contact(contact_id: int, request: Request, db: Session = Depend
     return JSONResponse(content={"ok": True})
 
 
+@router.delete("/dashboard/api/reminders/{reminder_id}")
+async def delete_reminder(reminder_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+    reminder = db.query(Reminder).filter(Reminder.id == reminder_id, Reminder.user_id == user.id).first()
+    if not reminder:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    db.delete(reminder)
+    db.commit()
+    return JSONResponse(content={"ok": True})
+
+
 # ─── Main Dashboard ───────────────────────────────────────
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -704,6 +717,9 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     # Notification contacts
     contacts = db.query(NotificationContact).filter(NotificationContact.user_id == user.id).order_by(NotificationContact.name).all()
 
+    # Active reminders
+    reminders = db.query(Reminder).filter(Reminder.user_id == user.id, Reminder.sent == False).order_by(Reminder.remind_at).all()
+
     # Memo topics with linked entry counts
     memo_topics_list = db.query(MemoTopic).filter(MemoTopic.user_id == user.id).order_by(MemoTopic.name).all()
     memo_topic_data = []
@@ -730,7 +746,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     task_groups = sorted(set(t.group for t in all_tasks)) if all_tasks else ["General", "Errands", "House", "Work", "Health", "Personal", "Dogs"]
     remember_cats = sorted(set(r.category for r in remember_items)) if remember_items else ["General", "People", "Passwords", "Home", "Work", "Reference"]
 
-    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data, memo_topics_list, linked_entry_ids)
+    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data, memo_topics_list, linked_entry_ids, reminders)
     return HTMLResponse(content=html)
 
 # ─── Helpers ──────────────────────────────────────────────
@@ -792,7 +808,7 @@ def _days_left(deleted_at):
 
 # ─── Render ──────────────────────────────────────────────
 
-def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data=None, memo_topics_list=None, linked_entry_ids=None):
+def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data=None, memo_topics_list=None, linked_entry_ids=None, reminders=None):
 
     memo_topic_data = memo_topic_data or []
     memo_topics_list = memo_topics_list or []
@@ -1104,6 +1120,24 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
     else:
         trash_html = '<div class="empty-state"><div class="empty-icon">&#128465;</div><div>Trash is empty</div></div>'
 
+    # ── Reminders ──
+    reminders = reminders or []
+    reminders_html = ""
+    if reminders:
+        local_tz = ZoneInfo(settings.timezone)
+        for r in reminders:
+            rt = r.remind_at.replace(tzinfo=timezone.utc).astimezone(local_tz)
+            recur_badge = f' <span class="badge" style="background:#6366f1">{r.recurring}</span>' if r.recurring else ''
+            reminders_html += f'''<div class="item" id="reminder-{r.id}">
+                <div class="rem-row">
+                    <div class="rem-content">{_e(r.message)}</div>
+                    <button class="del-btn" onclick="deleteReminder({r.id})" title="Delete reminder">&#128465;</button>
+                </div>
+                <div class="rem-meta"><span class="ts">{rt.strftime("%a %b %d, %I:%M %p")}</span>{recur_badge}</div>
+            </div>'''
+    else:
+        reminders_html = '<div class="empty-state"><div class="empty-icon">&#9200;</div><div>No active reminders. Tell Zeph to remind you about something.</div></div>'
+
     # ── Settings / Contacts ──
     contacts_html = ""
     mode_labels = {"always": "Always notify", "mentioned": "When mentioned", "never": "Never"}
@@ -1371,6 +1405,7 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
         <button class="tab" onclick="showTab('calendar',this)">Calendar</button>
         <button class="tab" onclick="showTab('remember',this)">Remember</button>
         <button class="tab" onclick="showTab('journal',this)">Journal</button>
+        <button class="tab" onclick="showTab('reminders',this)">Reminders{f' <span class="tab-badge">{len(reminders)}</span>' if reminders else ''}</button>
         <button class="tab" onclick="showTab('memos',this)">Memos</button>
         <button class="tab" onclick="showTab('trash',this)">Trash{f' <span class="tab-badge">{trash_count}</span>' if trash_count else ''}</button>
         <button class="tab" onclick="showTab('settings',this)">Settings</button>
@@ -1443,6 +1478,13 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
             {journal_html}
         </div>
         {topics_html}
+    </div>
+
+    <div id="reminders" class="tc">
+        <div class="card">
+            <div class="card-title"><span>Active Reminders</span></div>
+            {reminders_html}
+        </div>
     </div>
 
     <div id="memos" class="tc">
@@ -1625,6 +1667,7 @@ async function addContact(){{
 }}
 async function updateContactMode(id,mode){{await api('POST','/dashboard/api/contacts/'+id+'/mode',{{notify_mode:mode}})}}
 async function deleteContact(id){{if(!confirm('Remove this contact?'))return;await api('DELETE','/dashboard/api/contacts/'+id);fadeOut('contact-'+id)}}
+async function deleteReminder(id){{if(!confirm('Delete this reminder?'))return;await api('DELETE','/dashboard/api/reminders/'+id);fadeOut('reminder-'+id);setTimeout(()=>location.reload(),400)}}
 async function addMemoTopic(){{
     const name=document.getElementById('memo-topic-name').value.trim();
     if(!name)return;
