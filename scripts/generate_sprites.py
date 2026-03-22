@@ -1,19 +1,19 @@
 """
-generate_sprites.py — Generate tamagotchi sprites via anime-gen API
-====================================================================
-Calls the local anime-gen ComfyUI backend to generate pixel art sprites
-for Zeph, Briar, and room backgrounds.
+generate_sprites.py — Generate tamagotchi character art and backgrounds
+========================================================================
+Uses anime-gen ComfyUI backend. Illustrated style (not pixel art).
 
-Prerequisites:
-  - anime-gen backend running on localhost:8001
-  - ComfyUI running on localhost:8000
-  - novaPixelsXL_v30.safetensors checkpoint installed
-  - [Qwen.Image]PixelArt_Redmond.safetensors LoRA installed
+Generates:
+  - Zeph poses (7) + 3 idle variation frames each = 28 character images
+  - Briar poses (3) + 3 idle variations each = 12 character images
+  - Room backgrounds (3 rooms x multiple weather variants) = ~12 backgrounds
 
 Usage:
     python scripts/generate_sprites.py
-    python scripts/generate_sprites.py --only zeph-reading
-    python scripts/generate_sprites.py --only rooms
+    python scripts/generate_sprites.py --only zeph
+    python scripts/generate_sprites.py --only backgrounds
+    python scripts/generate_sprites.py --only zeph/reading
+    python scripts/generate_sprites.py --list
 """
 
 import sys
@@ -22,90 +22,118 @@ import argparse
 import base64
 import requests
 import time
+import json
+import colorsys
 from io import BytesIO
 from PIL import Image
 
 API_BASE = "http://localhost:8001/api"
-CHECKPOINT = "novaPixelsXL_v30.safetensors"
-LORA = "[Qwen.Image]PixelArt_Redmond.safetensors"
-LORA_STRENGTH = 0.75
+CHECKPOINT = "novaAnimeXL_ilV170.safetensors"
+LORA = "none"
+LORA_STRENGTH = 0.0
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "sprites")
 
-# Chroma key background color for removal
-BG_COLOR = (0, 255, 0)  # bright green
-BG_TOLERANCE = 80
+# Character base prompt elements
+ZEPH_BASE = "anime illustration, single male elf, pointy ears, messy dark hair, pale skin, handsome, slim build, loose white medieval shirt, dark fitted pants, barefoot, dark fantasy aesthetic"
+BRIAR_BASE = "anime illustration, single large scruffy wolfhound dog, shaggy grey-brown fur, one torn ear, loyal gentle expression, dark fantasy aesthetic"
+NEGATIVE = "blurry, low quality, jpeg artifacts, watermark, text, signature, multiple characters, crowd, chibi, deformed, bad anatomy, extra limbs, pixel art, pixelated"
 
-
-# ─── Sprite Definitions ──────────────────────────────────────
+# ─── Character Definitions ───────────────────────────────────
 
 CHARACTER_SPRITES = {
-    # Zeph poses — generate at 1024x1024, output at 128x128
     "zeph/reading": {
-        "prompt": "pixel art character sprite, male elf sitting reading a large book, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, warm lighting, centered in frame, full body visible, solid bright green background",
-        "size": (128, 128),
+        "prompt": f"{ZEPH_BASE}, sitting cross-legged reading a large old book, warm candlelight, focused expression, cozy atmosphere, solid green background, full body visible, centered",
+        "size": (256, 256),
     },
     "zeph/writing": {
-        "prompt": "pixel art character sprite, male elf sitting at desk writing with feather quill, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, inkwell nearby, centered in frame, full body visible, solid bright green background",
-        "size": (128, 128),
+        "prompt": f"{ZEPH_BASE}, sitting at wooden desk writing with feather quill pen, inkwell, parchment, concentrated expression, warm lighting, solid green background, full body visible, centered",
+        "size": (256, 256),
     },
     "zeph/sleeping": {
-        "prompt": "pixel art character sprite, male elf sleeping peacefully lying down on side, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, eyes closed, centered in frame, full body visible, solid bright green background",
-        "size": (128, 128),
+        "prompt": f"{ZEPH_BASE}, sleeping peacefully curled up on his side, eyes closed, relaxed expression, soft lighting, solid green background, full body visible, centered",
+        "size": (256, 256),
     },
     "zeph/eating": {
-        "prompt": "pixel art character sprite, male elf sitting at small table eating from bowl with spoon, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, centered in frame, full body visible, solid bright green background",
-        "size": (128, 128),
+        "prompt": f"{ZEPH_BASE}, sitting at small wooden table eating from a bowl, simple meal, relaxed, warm firelight, solid green background, full body visible, centered",
+        "size": (256, 256),
     },
     "zeph/magic": {
-        "prompt": "pixel art character sprite, male elf standing casting magic spell, glowing magical particles around hands, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, magical aura, centered in frame, full body visible, solid bright green background",
-        "size": (128, 128),
+        "prompt": f"{ZEPH_BASE}, standing with hands raised casting magic spell, glowing magical energy around hands, mystical aura, dramatic lighting, solid green background, full body visible, centered",
+        "size": (256, 256),
     },
     "zeph/walking": {
-        "prompt": "pixel art character sprite, male elf walking mid-stride to the right, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, natural walking pose, centered in frame, full body visible, solid bright green background",
-        "size": (128, 128),
+        "prompt": f"{ZEPH_BASE}, walking naturally mid-stride to the right, relaxed posture, windswept hair, solid green background, full body visible, centered",
+        "size": (256, 256),
     },
     "zeph/sitting": {
-        "prompt": "pixel art character sprite, male elf sitting cross-legged on ground relaxed, pointy ears, messy dark hair, white loose medieval shirt, dark fitted pants, barefoot, peaceful expression, centered in frame, full body visible, solid bright green background",
-        "size": (128, 128),
+        "prompt": f"{ZEPH_BASE}, sitting on the ground relaxed, one knee up, looking at the sky, peaceful contemplative expression, solid green background, full body visible, centered",
+        "size": (256, 256),
     },
-    # Briar poses
     "briar/sleeping": {
-        "prompt": "pixel art character sprite, large scruffy wolfhound dog sleeping curled up in a ball, shaggy grey-brown fur, one torn ear, peaceful, centered in frame, solid bright green background",
-        "size": (128, 80),
+        "prompt": f"{BRIAR_BASE}, sleeping curled up in a ball, peaceful, warm lighting, solid green background, centered",
+        "size": (256, 160),
     },
     "briar/sitting": {
-        "prompt": "pixel art character sprite, large scruffy wolfhound dog sitting upright looking alert, shaggy grey-brown fur, one torn ear, tongue slightly out, centered in frame, solid bright green background",
-        "size": (128, 80),
+        "prompt": f"{BRIAR_BASE}, sitting upright looking alert, tongue slightly out, tail relaxed, solid green background, centered",
+        "size": (256, 160),
     },
     "briar/following": {
-        "prompt": "pixel art character sprite, large scruffy wolfhound dog trotting walking to the right, shaggy grey-brown fur, one torn ear, tail wagging, happy, centered in frame, solid bright green background",
-        "size": (128, 80),
+        "prompt": f"{BRIAR_BASE}, trotting walking to the right, happy expression, tail wagging, solid green background, centered",
+        "size": (256, 160),
     },
 }
 
-ROOM_SPRITES = {
-    "rooms/study": {
-        "prompt": "pixel art game background, dark stone tower study interior, side view platformer style, wooden desk with open books and scrolls, melting candles with warm orange glow, tall bookshelf packed with colorful books, arched stone window showing grey stormy sea, ink bottles and quill pen on desk, cracked stone walls with ivy, cozy cluttered atmosphere, dark fantasy rpg aesthetic, detailed pixel art, no characters, moody warm lighting",
-        "size": (320, 240),
+# ─── Background Definitions ─────────────────────────────────
+
+BACKGROUND_SPRITES = {
+    # Study variants
+    "rooms/study-day": {
+        "prompt": "anime illustration background, dark stone tower study interior, wooden desk covered in open books and scrolls, melting candles, tall bookshelf packed with colorful books, arched stone window showing daylight and grey sea, ink bottles and quill pen, cracked stone walls with ivy, cozy cluttered atmosphere, warm natural light from window, dark fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
     },
-    "rooms/kitchen": {
-        "prompt": "pixel art game background, medieval stone tower kitchen interior, side view platformer style, heavy wooden table with bread and bowls, large stone fireplace with bright crackling fire, warm orange glow filling room, hanging copper pots on wall, wooden chair, shelves with glass jars and pottery, stone tile floor, cozy rustic atmosphere, dark fantasy rpg aesthetic, detailed pixel art, no characters",
-        "size": (320, 240),
+    "rooms/study-night": {
+        "prompt": "anime illustration background, dark stone tower study interior, wooden desk covered in open books and scrolls, glowing melting candles as only light source, tall bookshelf, arched stone window showing dark night sky with stars, ink bottles and quill pen, stone walls, warm candlelight atmosphere, dark moody, dark fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
     },
-    "rooms/outside-day": {
-        "prompt": "pixel art game background, dramatic cliff edge overlooking grey restless ocean, side view platformer style, old stone tower visible on left side, winding dirt path along cliff, single wind-bent gnarled tree, wild grass and wildflowers, overcast dramatic sky with heavy clouds, seabirds flying, waves crashing below, coastal dark fantasy rpg aesthetic, detailed pixel art, no characters, daytime",
-        "size": (320, 240),
+    # Kitchen variants
+    "rooms/kitchen-day": {
+        "prompt": "anime illustration background, medieval stone tower kitchen interior, heavy wooden table with bread and bowls, large stone fireplace with low embers, daylight coming through small window, hanging copper pots, wooden chair, shelves with jars, stone floor, cozy rustic morning atmosphere, dark fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
+    },
+    "rooms/kitchen-night": {
+        "prompt": "anime illustration background, medieval stone tower kitchen interior, heavy wooden table with bread and bowls, large stone fireplace with bright crackling fire as main light, warm orange glow filling room, hanging copper pots, wooden chair, shelves with glass jars, stone floor, cozy evening atmosphere, dark fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
+    },
+    # Outside variants
+    "rooms/outside-sunny": {
+        "prompt": "anime illustration background, cliff edge overlooking bright blue ocean, old stone tower visible on right, winding dirt path along cliff, green grass and wildflowers, single wind-bent tree, clear sky with scattered clouds, seabirds flying, bright sunny day, coastal fantasy aesthetic, detailed, beautiful, no characters",
+        "size": (640, 480),
+    },
+    "rooms/outside-overcast": {
+        "prompt": "anime illustration background, cliff edge overlooking grey restless ocean, old stone tower visible on right, winding dirt path, wild grass, dramatic overcast sky with heavy clouds, moody atmosphere, waves crashing below, coastal dark fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
+    },
+    "rooms/outside-rain": {
+        "prompt": "anime illustration background, cliff edge in heavy rain, ocean grey and rough, old stone tower visible on right with warm glowing window, dirt path turned muddy, rain streaks visible, dark storm clouds, dramatic moody atmosphere, wet surfaces reflecting light, coastal dark fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
     },
     "rooms/outside-night": {
-        "prompt": "pixel art game background, cliff edge overlooking dark moonlit ocean at night, side view platformer style, old stone tower on left with warm glowing window, winding path, tree silhouette against starry sky, bright moon, twinkling stars, gentle silver waves below, dark blue and purple palette, coastal dark fantasy rpg aesthetic, detailed pixel art, no characters, nighttime",
-        "size": (320, 240),
+        "prompt": "anime illustration background, cliff edge overlooking dark moonlit ocean at night, old stone tower on right with warm glowing window, winding path, tree silhouette, bright moon, twinkling stars, silver waves below, dark blue and purple palette, serene nighttime, coastal fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
+    },
+    "rooms/outside-sunset": {
+        "prompt": "anime illustration background, cliff edge overlooking ocean at golden sunset, old stone tower silhouette on right, dramatic orange and purple sky, sun low on horizon, golden light on grass and path, long shadows, seabirds, breathtaking view, coastal fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
+    },
+    "rooms/outside-fog": {
+        "prompt": "anime illustration background, cliff edge shrouded in thick morning fog, ocean barely visible below, old stone tower fading into mist on right, path disappearing into fog, mysterious ethereal atmosphere, muted colors, soft diffused light, coastal dark fantasy aesthetic, detailed, no characters",
+        "size": (640, 480),
     },
 }
 
 
 def check_api():
-    """Verify anime-gen API is running."""
     try:
         r = requests.get(f"{API_BASE}/status", timeout=5)
         data = r.json()
@@ -117,95 +145,166 @@ def check_api():
             return False
     except Exception as e:
         print(f"[FAIL] anime-gen API not reachable: {e}")
-        print("  Start it with: cd C:\\Users\\rober\\Projects\\imagegenera\\anime-gen && start.bat")
         return False
 
 
-def generate_sprite(name: str, config: dict, is_room: bool = False) -> bool:
-    """Generate a single sprite via the anime-gen API."""
-    print(f"\n  Generating {name}...", end=" ", flush=True)
+def generate_image(name, prompt, size, is_background=False, gen_width=1024, gen_height=None):
+    """Generate a single image via the anime-gen API."""
+    if gen_height is None:
+        gen_height = 768 if is_background else 1024
+
+    print(f"  Generating {name}...", end=" ", flush=True)
 
     payload = {
-        "prompt": config["prompt"],
-        "negative_prompt": "blurry, smooth, photorealistic, 3d render, realistic, photograph, text, watermark, signature, multiple characters, crowd, low quality, jpeg artifacts, gradient, anti-aliased, soft edges",
+        "prompt": prompt,
+        "negative_prompt": NEGATIVE,
         "checkpoint": CHECKPOINT,
         "lora": LORA,
         "lora_strength": LORA_STRENGTH,
         "quality": "quality",
-        "width": 1024,
-        "height": 1024 if not is_room else 768,
+        "width": gen_width,
+        "height": gen_height,
         "seed": -1,
         "skip_enhance": True,
         "regions_enabled": False,
         "img2img_enabled": False,
         "image_mode": "anime",
-        "style": "pixel_art",
+        "style": "anime",
     }
 
     try:
-        r = requests.post(f"{API_BASE}/generate", json=payload, timeout=120)
+        r = requests.post(f"{API_BASE}/generate", json=payload, timeout=180)
         if r.status_code != 200:
             print(f"FAILED (HTTP {r.status_code})")
-            try:
-                print(f"    Error: {r.json().get('detail', r.text[:200])}")
-            except Exception:
-                print(f"    Response: {r.text[:200]}")
-            return False
+            return None
 
         data = r.json()
         image_b64 = data.get("image")
         if not image_b64:
-            print("FAILED (no image in response)")
-            return False
+            print("FAILED (no image)")
+            return None
 
-        # Decode image
         image_bytes = base64.b64decode(image_b64)
         img = Image.open(BytesIO(image_bytes)).convert("RGBA")
 
-        target_w, target_h = config["size"]
+        target_w, target_h = size
 
-        if not is_room:
-            # Character sprite: remove green background
-            img = remove_bg_chroma(img)
+        if not is_background:
+            img = remove_bg(img)
 
-        # Downscale with nearest-neighbor (keeps pixels sharp)
-        img = img.resize((target_w, target_h), Image.NEAREST)
+        # High-quality downscale
+        img = img.resize((target_w, target_h), Image.LANCZOS)
 
-        # Save
         output_path = os.path.join(OUTPUT_DIR, f"{name}.png")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path, "PNG")
 
         print(f"OK -> {output_path} ({target_w}x{target_h})")
-        return True
+        return img
 
     except requests.Timeout:
         print("FAILED (timeout)")
-        return False
+        return None
     except Exception as e:
         print(f"FAILED ({e})")
-        return False
+        return None
 
 
-def remove_bg_chroma(img: Image.Image) -> Image.Image:
-    """Remove green background using HSV color space for better coverage."""
-    import colorsys
+def generate_idle_frames(name, base_img, prompt, size, num_frames=3):
+    """Generate subtle idle animation variations using img2img at low denoise."""
+    if base_img is None:
+        return 0
 
+    print(f"  Generating {num_frames} idle frames for {name}...", end=" ", flush=True)
+
+    # Save base image as frame 0 (already saved as the main sprite)
+    # Generate frames 1, 2, 3 as subtle variations
+
+    # Upload the base image for img2img
+    base_full = base_img.resize((1024, 1024), Image.LANCZOS).convert("RGB")
+    buf = BytesIO()
+    base_full.save(buf, format="PNG")
+    buf.seek(0)
+
+    try:
+        upload_resp = requests.post(
+            f"{API_BASE}/upload-img2img",
+            files={"file": ("base.png", buf, "image/png")},
+            timeout=30,
+        )
+        if upload_resp.status_code != 200:
+            print(f"FAILED (upload: {upload_resp.status_code})")
+            return 0
+
+        img2img_filename = upload_resp.json().get("filename")
+        if not img2img_filename:
+            print("FAILED (no filename)")
+            return 0
+    except Exception as e:
+        print(f"FAILED (upload: {e})")
+        return 0
+
+    generated = 0
+    for i in range(1, num_frames + 1):
+        payload = {
+            "prompt": prompt,
+            "negative_prompt": NEGATIVE,
+            "checkpoint": CHECKPOINT,
+            "lora": LORA,
+            "lora_strength": LORA_STRENGTH,
+            "quality": "balanced",
+            "width": 1024,
+            "height": 1024,
+            "seed": -1,
+            "skip_enhance": True,
+            "regions_enabled": False,
+            "img2img_enabled": True,
+            "img2img_image": img2img_filename,
+            "img2img_denoise": 0.25,
+            "image_mode": "anime",
+            "style": "anime",
+        }
+
+        try:
+            r = requests.post(f"{API_BASE}/generate", json=payload, timeout=180)
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            image_b64 = data.get("image")
+            if not image_b64:
+                continue
+
+            image_bytes = base64.b64decode(image_b64)
+            img = Image.open(BytesIO(image_bytes)).convert("RGBA")
+
+            img = remove_bg(img)
+            target_w, target_h = size
+            img = img.resize((target_w, target_h), Image.LANCZOS)
+
+            frame_path = os.path.join(OUTPUT_DIR, f"{name}-f{i}.png")
+            img.save(frame_path, "PNG")
+            generated += 1
+
+        except Exception:
+            continue
+
+        time.sleep(1)
+
+    print(f"{generated} frames OK")
+    return generated
+
+
+def remove_bg(img):
+    """Remove green background using HSV color space."""
     data = img.getdata()
     new_data = []
     for pixel in data:
         r, g, b, a = pixel
-        # Convert to HSV
         h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
         hue_deg = h * 360
-
-        # Green hue range: roughly 70-170 degrees
-        # Also catch desaturated greens and very bright/dark greens
         is_green = (70 < hue_deg < 170) and (s > 0.15) and (v > 0.15)
-
-        # Also catch near-white and near-grey pixels at edges (anti-aliasing artifacts)
-        is_edge = (s < 0.1) and (v > 0.85)
-
+        is_edge = (s < 0.08) and (v > 0.88)
         if is_green or is_edge:
             new_data.append((0, 0, 0, 0))
         else:
@@ -217,61 +316,82 @@ def remove_bg_chroma(img: Image.Image) -> Image.Image:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate tamagotchi sprites")
-    parser.add_argument("--only", help="Generate only this sprite (e.g., 'zeph-reading', 'rooms', 'briar')")
+    parser = argparse.ArgumentParser(description="Generate tamagotchi sprites and backgrounds")
+    parser.add_argument("--only", help="Generate subset: 'zeph', 'briar', 'backgrounds', or specific like 'zeph/reading'")
+    parser.add_argument("--no-frames", action="store_true", help="Skip idle animation frame generation")
     parser.add_argument("--list", action="store_true", help="List all sprite names")
     args = parser.parse_args()
 
-    all_sprites = {**CHARACTER_SPRITES, **ROOM_SPRITES}
+    all_chars = dict(CHARACTER_SPRITES)
+    all_bgs = dict(BACKGROUND_SPRITES)
 
     if args.list:
-        print("Available sprites:")
-        for name in all_sprites:
+        print("Characters:")
+        for name in all_chars:
+            print(f"  {name}")
+        print("Backgrounds:")
+        for name in all_bgs:
             print(f"  {name}")
         return
 
     if not check_api():
         sys.exit(1)
 
-    # Filter sprites if --only specified
-    if args.only:
-        if args.only == "rooms":
-            sprites = {k: v for k, v in ROOM_SPRITES.items()}
-        elif args.only == "briar":
-            sprites = {k: v for k, v in CHARACTER_SPRITES.items() if k.startswith("briar/")}
-        elif args.only == "zeph":
-            sprites = {k: v for k, v in CHARACTER_SPRITES.items() if k.startswith("zeph/")}
-        else:
-            # Try exact match or partial
-            name = args.only.replace("-", "/")
-            if name in all_sprites:
-                sprites = {name: all_sprites[name]}
-            else:
-                print(f"Unknown sprite: {args.only}")
-                print("Use --list to see available sprites")
-                sys.exit(1)
-    else:
-        sprites = all_sprites
+    # Determine what to generate
+    chars_to_gen = {}
+    bgs_to_gen = {}
 
-    print(f"Generating {len(sprites)} sprites using {CHECKPOINT} + {LORA}")
-    print(f"Output: {OUTPUT_DIR}")
+    if args.only:
+        if args.only == "backgrounds":
+            bgs_to_gen = all_bgs
+        elif args.only == "zeph":
+            chars_to_gen = {k: v for k, v in all_chars.items() if k.startswith("zeph/")}
+        elif args.only == "briar":
+            chars_to_gen = {k: v for k, v in all_chars.items() if k.startswith("briar/")}
+        elif args.only in all_chars:
+            chars_to_gen = {args.only: all_chars[args.only]}
+        elif args.only.replace("-", "/") in all_chars:
+            key = args.only.replace("-", "/")
+            chars_to_gen = {key: all_chars[key]}
+        elif args.only in all_bgs:
+            bgs_to_gen = {args.only: all_bgs[args.only]}
+        else:
+            print(f"Unknown: {args.only}. Use --list")
+            sys.exit(1)
+    else:
+        chars_to_gen = all_chars
+        bgs_to_gen = all_bgs
+
+    total = len(chars_to_gen) + len(bgs_to_gen)
+    print(f"\nGenerating {len(chars_to_gen)} characters + {len(bgs_to_gen)} backgrounds")
+    print(f"Checkpoint: {CHECKPOINT}")
+    print(f"Output: {OUTPUT_DIR}\n")
 
     success = 0
     failed = 0
 
-    for name, config in sprites.items():
-        is_room = name.startswith("rooms/")
-        if generate_sprite(name, config, is_room):
+    # Generate characters
+    for name, config in chars_to_gen.items():
+        base_img = generate_image(name, config["prompt"], config["size"], is_background=False)
+        if base_img:
+            success += 1
+            if not args.no_frames:
+                generate_idle_frames(name, base_img, config["prompt"], config["size"])
+        else:
+            failed += 1
+        time.sleep(1)
+
+    # Generate backgrounds
+    for name, config in bgs_to_gen.items():
+        result = generate_image(name, config["prompt"], config["size"], is_background=True, gen_width=1024, gen_height=768)
+        if result:
             success += 1
         else:
             failed += 1
-        # Small delay between requests
         time.sleep(1)
 
     print(f"\n{'='*40}")
     print(f"Done: {success} succeeded, {failed} failed")
-    if success > 0:
-        print(f"Sprites saved to: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":

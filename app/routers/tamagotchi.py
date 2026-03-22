@@ -41,13 +41,12 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 
 .scene-container {
     position: relative;
-    width: 320px;
-    height: 240px;
+    width: 640px;
+    height: 480px;
     border: 2px solid #2a2a3a;
-    border-radius: 8px;
+    border-radius: 12px;
     overflow: hidden;
-    image-rendering: pixelated;
-    box-shadow: 0 0 30px rgba(100, 80, 60, 0.3);
+    box-shadow: 0 0 40px rgba(100, 80, 60, 0.3);
 }
 
 /* Room backgrounds */
@@ -143,8 +142,8 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 }
 
 .zeph-sprite {
-    width: 48px;
-    height: 48px;
+    width: 96px;
+    height: 96px;
     background: #6a5acd;
     border-radius: 6px 6px 2px 2px;
     position: relative;
@@ -170,8 +169,8 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 }
 
 .briar-sprite {
-    width: 48px;
-    height: 30px;
+    width: 96px;
+    height: 60px;
     background: #8a7a6a;
     border-radius: 8px 10px 3px 3px;
     position: relative;
@@ -399,15 +398,15 @@ const ROOM_FURNITURE = {
 //   Outside day: grass RIGHT side near tower (x:200+) and LEFT cliff (x:20-80), water in center!
 //   Outside night: path center-bottom (x:100-200), near tower (x:80-150)
 const ZEPH_POS = {
-    study:   { reading: {l:60,b:22}, writing: {l:50,b:22}, magic: {l:180,b:22}, sleeping: {l:140,b:20}, sitting: {l:100,b:22}, eating: {l:70,b:22}, walking: {l:120,b:22} },
-    kitchen: { eating: {l:120,b:22}, reading: {l:60,b:22}, sitting: {l:80,b:22}, sleeping: {l:50,b:20}, writing: {l:120,b:22}, magic: {l:180,b:22}, walking: {l:100,b:22} },
-    outside: { walking: {l:210,b:22}, sitting: {l:220,b:22}, reading: {l:230,b:22}, magic: {l:40,b:35}, sleeping: {l:220,b:20}, eating: {l:215,b:22}, writing: {l:225,b:22} },
+    study:   { reading: {l:100,b:35}, writing: {l:80,b:35}, magic: {l:350,b:35}, sleeping: {l:300,b:30}, sitting: {l:200,b:35}, eating: {l:120,b:35}, walking: {l:250,b:35} },
+    kitchen: { eating: {l:200,b:35}, reading: {l:100,b:35}, sitting: {l:150,b:35}, sleeping: {l:80,b:30}, writing: {l:200,b:35}, magic: {l:350,b:35}, walking: {l:250,b:35} },
+    outside: { walking: {l:400,b:35}, sitting: {l:420,b:35}, reading: {l:430,b:35}, magic: {l:80,b:60}, sleeping: {l:400,b:30}, eating: {l:410,b:35}, writing: {l:420,b:35} },
 };
 
 const BRIAR_POS = {
-    study:   { sleeping: {l:200,b:22}, sitting: {l:190,b:22}, following: {l:130,b:22} },
-    kitchen: { sleeping: {l:180,b:22}, sitting: {l:50,b:22}, following: {l:160,b:22}, eating: {l:170,b:22} },
-    outside: { sleeping: {l:230,b:22}, sitting: {l:240,b:22}, following: {l:250,b:22} },
+    study:   { sleeping: {l:380,b:30}, sitting: {l:360,b:30}, following: {l:250,b:30} },
+    kitchen: { sleeping: {l:350,b:30}, sitting: {l:100,b:30}, following: {l:300,b:30}, eating: {l:330,b:30} },
+    outside: { sleeping: {l:440,b:30}, sitting: {l:450,b:30}, following: {l:480,b:30} },
 };
 
 function generateStars() {
@@ -467,7 +466,19 @@ function renderScene(data) {
 
     // Room — try sprite background, fall back to CSS color + furniture
     room.className = 'room room-' + data.room;
-    const roomKey = data.room === 'outside' ? 'rooms/outside-' + (data.time_of_day === 'night' ? 'night' : 'day') : 'rooms/' + data.room;
+    // Pick weather-appropriate background variant
+    let roomKey;
+    if (data.room === 'outside') {
+        const weather = (data.weather || '').toLowerCase();
+        if (data.time_of_day === 'night') roomKey = 'rooms/outside-night';
+        else if (weather.includes('rain') || weather.includes('storm')) roomKey = 'rooms/outside-rain';
+        else if (weather.includes('fog') || weather.includes('mist')) roomKey = 'rooms/outside-fog';
+        else if (data.time_of_day === 'dusk') roomKey = 'rooms/outside-sunset';
+        else if (weather.includes('clear') || weather.includes('sun')) roomKey = 'rooms/outside-sunny';
+        else roomKey = 'rooms/outside-overcast';
+    } else {
+        roomKey = 'rooms/' + data.room + '-' + (data.time_of_day === 'night' ? 'night' : 'day');
+    }
 
     // Check if room sprite exists — hide furniture if it does
     const roomUrl = spriteUrl(roomKey);
@@ -533,15 +544,16 @@ function renderScene(data) {
     info.textContent = (timeLabels[data.time_of_day] || '') + '  •  ' + (roomLabels[data.room] || data.room) + '  •  ' + data.weather;
     flavor.textContent = data.flavor || '';
 
-    // Start Briar roaming
+    // Start Briar roaming and frame animation
     startRoaming(data.room, data.briar_activity);
+    startFrameAnimation(data.zeph_activity, data.briar_activity);
 }
 
 // Briar roaming — wanders between safe points in each room
 const ROAM_ZONES = {
-    study:   [{l:130,b:22}, {l:170,b:22}, {l:200,b:22}, {l:220,b:22}, {l:150,b:22}],
-    kitchen: [{l:50,b:22}, {l:100,b:22}, {l:150,b:22}, {l:180,b:22}, {l:70,b:22}],
-    outside: [{l:200,b:22}, {l:220,b:25}, {l:240,b:22}, {l:260,b:22}, {l:210,b:28}],
+    study:   [{l:250,b:30}, {l:320,b:30}, {l:380,b:30}, {l:440,b:30}, {l:280,b:30}],
+    kitchen: [{l:100,b:30}, {l:200,b:30}, {l:300,b:30}, {l:350,b:30}, {l:150,b:30}],
+    outside: [{l:380,b:30}, {l:420,b:35}, {l:460,b:30}, {l:500,b:30}, {l:400,b:35}],
 };
 
 let _roamInterval = null;
@@ -587,6 +599,41 @@ function startRoaming(room, briarActivity) {
             }, 3000);
         }
     }, 6000 + Math.random() * 4000); // every 6-10 seconds
+}
+
+// Frame animation — cycle through idle variation frames
+let _frameInterval = null;
+let _currentZephActivity = '';
+let _currentBriarActivity = '';
+
+function startFrameAnimation(zephActivity, briarActivity) {
+    if (_frameInterval) clearInterval(_frameInterval);
+    _currentZephActivity = zephActivity;
+    _currentBriarActivity = briarActivity;
+
+    let zephFrame = 0;
+    let briarFrame = 0;
+    const maxFrames = 3;
+
+    _frameInterval = setInterval(function() {
+        const zephSprite = document.querySelector('.zeph-sprite');
+        const briarSprite = document.querySelector('.briar-sprite');
+
+        // Cycle Zeph frames: base -> f1 -> f2 -> f3 -> base -> ...
+        zephFrame = (zephFrame + 1) % (maxFrames + 1);
+        const zephPath = zephFrame === 0
+            ? 'zeph/' + _currentZephActivity
+            : 'zeph/' + _currentZephActivity + '-f' + zephFrame;
+        trySprite(zephSprite, zephPath);
+
+        // Cycle Briar frames
+        briarFrame = (briarFrame + 1) % (maxFrames + 1);
+        const briarPath = briarFrame === 0
+            ? 'briar/' + _currentBriarActivity
+            : 'briar/' + _currentBriarActivity + '-f' + briarFrame;
+        trySprite(briarSprite, briarPath);
+
+    }, 800); // swap frame every 800ms
 }
 
 async function fetchScene() {
