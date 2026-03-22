@@ -287,7 +287,7 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 /* When real sprites are loaded, hide CSS placeholder shapes */
 .has-sprite { background-color: transparent !important; }
 .has-sprite::before, .has-sprite::after { display: none !important; }
-.room.has-sprite .furniture { display: none; }
+#furniture.hidden { display: none; }
 
 /* Info bar */
 .info-bar {
@@ -410,35 +410,35 @@ function generateStars() {
 }
 
 // Sprite image cache — tracks which PNGs exist
-const _spriteCache = {{}};
-function spriteUrl(path) {{ return '/static/sprites/' + path + '.png'; }}
-function trySprite(el, path, fallbackClass) {{
+const _spriteCache = {};
+function spriteUrl(path) { return '/static/sprites/' + path + '.png'; }
+function trySprite(el, path, fallbackClass) {
     const url = spriteUrl(path);
-    if (_spriteCache[path] === true) {{
+    if (_spriteCache[path] === true) {
         el.style.backgroundImage = 'url(' + url + ')';
         el.style.backgroundSize = 'contain';
         el.style.backgroundRepeat = 'no-repeat';
         el.style.backgroundPosition = 'center';
         el.classList.add('has-sprite');
-    }} else if (_spriteCache[path] === false) {{
+    } else if (_spriteCache[path] === false) {
         // Known missing, keep CSS fallback
-    }} else {{
+    } else {
         // Unknown — probe it
         const img = new Image();
-        img.onload = function() {{
+        img.onload = function() {
             _spriteCache[path] = true;
             el.style.backgroundImage = 'url(' + url + ')';
             el.style.backgroundSize = 'contain';
             el.style.backgroundRepeat = 'no-repeat';
             el.style.backgroundPosition = 'center';
             el.classList.add('has-sprite');
-        }};
-        img.onerror = function() {{ _spriteCache[path] = false; }};
+        };
+        img.onerror = function() { _spriteCache[path] = false; };
         img.src = url;
-    }}
-}}
+    }
+}
 
-function renderScene(data) {{
+function renderScene(data) {
     const room = document.getElementById('room');
     const timeOverlay = document.getElementById('timeOverlay');
     const furniture = document.getElementById('furniture');
@@ -449,13 +449,38 @@ function renderScene(data) {{
     const flavor = document.getElementById('flavorText');
     const stars = document.getElementById('stars');
 
-    // Room — try sprite background, fall back to CSS color
+    // Room — try sprite background, fall back to CSS color + furniture
     room.className = 'room room-' + data.room;
     const roomKey = data.room === 'outside' ? 'rooms/outside-' + (data.time_of_day === 'night' ? 'night' : 'day') : 'rooms/' + data.room;
-    trySprite(room, roomKey);
+
+    // Check if room sprite exists — hide furniture if it does
+    const roomUrl = spriteUrl(roomKey);
+    if (_spriteCache[roomKey] === true) {
+        room.style.backgroundImage = 'url(' + roomUrl + ')';
+        room.style.backgroundSize = 'cover';
+        furniture.className = 'hidden';
+    } else if (_spriteCache[roomKey] === false) {
+        room.style.backgroundImage = '';
+        furniture.className = '';
+        furniture.innerHTML = ROOM_FURNITURE[data.room] || '';
+    } else {
+        const rimg = new Image();
+        rimg.onload = function() {
+            _spriteCache[roomKey] = true;
+            room.style.backgroundImage = 'url(' + roomUrl + ')';
+            room.style.backgroundSize = 'cover';
+            furniture.className = 'hidden';
+        };
+        rimg.onerror = function() {
+            _spriteCache[roomKey] = false;
+            furniture.innerHTML = ROOM_FURNITURE[data.room] || '';
+        };
+        rimg.src = roomUrl;
+        // Show furniture as fallback while probing
+        furniture.innerHTML = ROOM_FURNITURE[data.room] || '';
+    }
 
     timeOverlay.className = 'time-overlay time-' + data.time_of_day;
-    furniture.innerHTML = ROOM_FURNITURE[data.room] || '';
 
     // Stars only at night/dusk
     if (data.time_of_day === 'night' || data.time_of_day === 'dusk') {
@@ -466,7 +491,7 @@ function renderScene(data) {{
     }
 
     // Zeph position & animation
-    const zp = (ZEPH_POS[data.room] || {{}})[data.zeph_activity] || {{l:100,b:42}};
+    const zp = (ZEPH_POS[data.room] || {})[data.zeph_activity] || {l:100,b:42};
     zeph.className = 'character zeph-' + data.zeph_activity;
     zeph.style.left = zp.l + 'px';
     zeph.style.bottom = zp.b + 'px';
@@ -480,7 +505,7 @@ function renderScene(data) {{
     }
 
     // Briar position & animation
-    const bp = (BRIAR_POS[data.room] || {{}})[data.briar_activity] || {{l:140,b:28}};
+    const bp = (BRIAR_POS[data.room] || {})[data.briar_activity] || {l:140,b:28};
     briar.className = 'character briar-' + data.briar_activity;
     briar.style.left = bp.l + 'px';
     briar.style.bottom = bp.b + 'px';
