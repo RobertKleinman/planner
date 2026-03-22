@@ -21,7 +21,7 @@ import logging
 
 from app.database import get_db
 from app.auth import hash_api_key
-from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, NotificationContact, MemoTopic, MemoTopicEntry, Reminder
+from app.models import User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, NotificationContact, MemoTopic, MemoTopicEntry, Reminder, ProfileMemory, EpisodicMemory, HypothesisMemory
 from app.services.google_auth import get_calendar_service
 from app.modules.memo import handle_memo
 from app.services import assistant as assistant_service
@@ -661,6 +661,31 @@ async def delete_reminder(reminder_id: int, request: Request, db: Session = Depe
     return JSONResponse(content={"ok": True})
 
 
+@router.delete("/dashboard/api/memory/{mem_type}/{mem_id}")
+async def delete_memory(mem_type: str, mem_id: int, request: Request, db: Session = Depends(get_db)):
+    user = _user(request, db)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Not logged in"})
+
+    model_map = {"profile": ProfileMemory, "episode": EpisodicMemory, "hypothesis": HypothesisMemory, "hyp": HypothesisMemory}
+    model = model_map.get(mem_type)
+    if not model:
+        return JSONResponse(status_code=400, content={"error": f"Unknown memory type: {mem_type}"})
+
+    mem = db.query(model).filter(model.id == mem_id, model.user_id == user.id).first()
+    if not mem:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    if mem_type == "profile":
+        mem.status = "deleted"
+    elif mem_type == "episode":
+        mem.status = "archived"
+    else:
+        mem.status = "superseded"
+    db.commit()
+    return JSONResponse(content={"ok": True})
+
+
 # ─── Main Dashboard ───────────────────────────────────────
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -746,7 +771,14 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     task_groups = sorted(set(t.group for t in all_tasks)) if all_tasks else ["General", "Errands", "House", "Work", "Health", "Personal", "Dogs"]
     remember_cats = sorted(set(r.category for r in remember_items)) if remember_items else ["General", "People", "Passwords", "Home", "Work", "Reference"]
 
-    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data, memo_topics_list, linked_entry_ids, reminders)
+    # Memory system data
+    profile_memories = db.query(ProfileMemory).filter(ProfileMemory.user_id == user.id, ProfileMemory.status == "active").order_by(ProfileMemory.created_at.desc()).all()
+    episodic_memories = db.query(EpisodicMemory).filter(EpisodicMemory.user_id == user.id, EpisodicMemory.status == "active").order_by(EpisodicMemory.updated_at.desc()).all()
+    hypothesis_memories = db.query(HypothesisMemory).filter(HypothesisMemory.user_id == user.id, HypothesisMemory.status.in_(["provisional", "active"])).order_by(HypothesisMemory.confidence.desc()).all()
+    outdated_memories = db.query(ProfileMemory).filter(ProfileMemory.user_id == user.id, ProfileMemory.status.in_(["outdated", "deleted"])).order_by(ProfileMemory.updated_at.desc()).limit(20).all()
+    superseded_hypotheses = db.query(HypothesisMemory).filter(HypothesisMemory.user_id == user.id, HypothesisMemory.status.in_(["superseded", "challenged"])).order_by(HypothesisMemory.updated_at.desc()).limit(20).all()
+
+    html = _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data, memo_topics_list, linked_entry_ids, reminders, profile_memories=profile_memories, episodic_memories=episodic_memories, hypothesis_memories=hypothesis_memories, outdated_memories=outdated_memories, superseded_hypotheses=superseded_hypotheses)
     return HTMLResponse(content=html)
 
 # ─── Helpers ──────────────────────────────────────────────
@@ -808,11 +840,106 @@ def _days_left(deleted_at):
 
 # ─── Render ──────────────────────────────────────────────
 
-def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data=None, memo_topics_list=None, linked_entry_ids=None, reminders=None):
+def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_items, journal_entries, trashed, contacts, task_groups, remember_cats, total_open, total_done_today, total_journal_today, today_tasks, today_events, today_memos, today_journal, memo_topic_data=None, memo_topics_list=None, linked_entry_ids=None, reminders=None, profile_memories=None, episodic_memories=None, hypothesis_memories=None, outdated_memories=None, superseded_hypotheses=None):
 
     memo_topic_data = memo_topic_data or []
     memo_topics_list = memo_topics_list or []
     linked_entry_ids = linked_entry_ids or set()
+    profile_memories = profile_memories or []
+    episodic_memories = episodic_memories or []
+    hypothesis_memories = hypothesis_memories or []
+    outdated_memories = outdated_memories or []
+    superseded_hypotheses = superseded_hypotheses or []
+
+    # ── Memory tab ──
+    memory_count = len(profile_memories) + len(episodic_memories) + len(hypothesis_memories)
+
+    # Profile memories section
+    profile_html = ""
+    if profile_memories:
+        for p in profile_memories:
+            conf_bar = f'<div class="conf-bar"><div class="conf-fill" style="width:{int(p.confidence*100)}%"></div></div>'
+            source_badge = f'<span class="mem-source mem-source-{p.source}">{p.source}</span>'
+            profile_html += f'''<div class="mem-item" id="mem-profile-{p.id}">
+                <div class="mem-top">
+                    <span class="mem-cat">{_e(p.category)}</span>
+                    {source_badge}
+                    {conf_bar}
+                    <button class="del-btn" onclick="deleteMemory('profile',{p.id})" title="Delete">&#128465;</button>
+                </div>
+                <div class="mem-content">{_e(p.content)}</div>
+                <div class="mem-meta">{_fdate(p.created_at)}{f' | tags: {_e(p.tags)}' if p.tags else ''}</div>
+            </div>'''
+    else:
+        profile_html = '<div class="mem-empty">No profile memories yet. Zeph will learn about you over time.</div>'
+
+    # Episodic memories section
+    episode_html = ""
+    if episodic_memories:
+        for e in episodic_memories:
+            imp_pct = int(e.importance * 100)
+            imp_color = "#22c55e" if imp_pct >= 70 else "#eab308" if imp_pct >= 40 else "#6b7280"
+            episode_html += f'''<div class="mem-item" id="mem-episode-{e.id}">
+                <div class="mem-top">
+                    <span class="mem-imp" style="color:{imp_color}" title="Importance: {imp_pct}%">&#9679; {imp_pct}%</span>
+                    {f'<span class="mem-recur">&#x21bb; {e.recurrence_count}x</span>' if e.recurrence_count > 1 else ''}
+                    <button class="del-btn" onclick="deleteMemory('episode',{e.id})" title="Archive">&#128465;</button>
+                </div>
+                <div class="mem-content">{_e(e.summary)}</div>
+                <div class="mem-meta">{_fdate(e.time_start) if e.time_start else _fdate(e.created_at)}{f' | tags: {_e(e.tags)}' if e.tags else ''}</div>
+            </div>'''
+    else:
+        episode_html = '<div class="mem-empty">No episodes recorded yet.</div>'
+
+    # Hypothesis memories section
+    hypothesis_html = ""
+    if hypothesis_memories:
+        for h in hypothesis_memories:
+            conf_pct = int(h.confidence * 100)
+            status_color = {{"provisional": "#eab308", "active": "#22c55e", "challenged": "#ef4444"}}.get(h.status, "#6b7280")
+            evidence_text = f"+{h.evidence_for} / -{h.evidence_against}"
+            hypothesis_html += f'''<div class="mem-item mem-hyp" id="mem-hyp-{h.id}">
+                <div class="mem-top">
+                    <span class="mem-status" style="color:{status_color}">{h.status}</span>
+                    <span class="mem-conf">{conf_pct}% confident</span>
+                    <span class="mem-evidence" title="Evidence for / against">{evidence_text}</span>
+                    <button class="del-btn" onclick="deleteMemory('hypothesis',{h.id})" title="Delete">&#128465;</button>
+                </div>
+                <div class="mem-content"><strong>{_e(h.short_summary)}</strong></div>
+                <div class="mem-detail">{_e(h.long_summary)}</div>
+                <div class="mem-meta">{_fdate(h.created_at)}{f' | {_e(h.category)}' if h.category else ''}{f' | tags: {_e(h.tags)}' if h.tags else ''}{f' | last confirmed: {_fdate(h.last_confirmed)}' if h.last_confirmed else ''}</div>
+            </div>'''
+    else:
+        hypothesis_html = '<div class="mem-empty">No hypotheses yet. Zeph will start forming these after several conversations.</div>'
+
+    # Archived/superseded section
+    archive_html = ""
+    if outdated_memories or superseded_hypotheses:
+        archive_html = '<div class="mem-archive-section">'
+        for p in outdated_memories:
+            archive_html += f'<div class="mem-item mem-archived"><div class="mem-content"><s>{_e(p.content)}</s></div><div class="mem-meta">{p.status} | {_fdate(p.updated_at)}</div></div>'
+        for h in superseded_hypotheses:
+            archive_html += f'<div class="mem-item mem-archived"><div class="mem-content"><s>{_e(h.short_summary)}</s></div><div class="mem-meta">{h.status} | {_fdate(h.updated_at)}</div></div>'
+        archive_html += '</div>'
+
+    memory_html = f'''
+        <div class="card">
+            <div class="card-title"><span>Profile Facts</span><span class="mem-count">{len(profile_memories)}</span></div>
+            <div class="mem-desc">Stable things Zeph knows about you — identity, preferences, relationships.</div>
+            {profile_html}
+        </div>
+        <div class="card" style="margin-top:16px">
+            <div class="card-title"><span>Episodes</span><span class="mem-count">{len(episodic_memories)}</span></div>
+            <div class="mem-desc">Notable events and recurring situations from your conversations.</div>
+            {episode_html}
+        </div>
+        <div class="card" style="margin-top:16px">
+            <div class="card-title"><span>Hypotheses</span><span class="mem-count">{len(hypothesis_memories)}</span></div>
+            <div class="mem-desc">Patterns Zeph has inferred about you. These are uncertain — confidence grows with evidence.</div>
+            {hypothesis_html}
+        </div>
+        {f'<div class="card" style="margin-top:16px"><div class="card-title"><span>Archived</span></div><div class="mem-desc">Outdated or superseded memories.</div>{archive_html}</div>' if archive_html else ''}
+    '''
 
     # ── Stats bar ──
     stats_html = f'''<div class="stats-bar">
@@ -1380,6 +1507,32 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
     .card{{padding:14px 16px}}
     .item{{padding:8px 10px}}
 }}
+/* Memory tab */
+.mem-item{{padding:12px;border:1px solid #334155;border-radius:8px;margin-bottom:10px;background:#1a2332}}
+.mem-item:hover{{border-color:#475569}}
+.mem-top{{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}}
+.mem-cat{{font-size:10px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;background:#334155;padding:2px 8px;border-radius:4px}}
+.mem-source{{font-size:9px;padding:2px 6px;border-radius:3px;font-weight:600;text-transform:uppercase}}
+.mem-source-explicit{{color:#22c55e;background:#052e16}}
+.mem-source-inferred{{color:#eab308;background:#422006}}
+.mem-content{{font-size:13px;color:#e2e8f0;line-height:1.5}}
+.mem-detail{{font-size:12px;color:#94a3b8;line-height:1.5;margin-top:4px;padding-left:8px;border-left:2px solid #334155}}
+.mem-meta{{font-size:10px;color:#64748b;margin-top:6px}}
+.mem-count{{font-size:12px;color:#64748b;font-weight:400}}
+.mem-desc{{font-size:11px;color:#64748b;margin-bottom:12px;line-height:1.4}}
+.mem-empty{{font-size:12px;color:#475569;font-style:italic;padding:8px}}
+.mem-status{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}}
+.mem-conf{{font-size:11px;color:#94a3b8;font-weight:600}}
+.mem-evidence{{font-size:10px;color:#64748b;font-family:monospace}}
+.mem-imp{{font-size:11px;font-weight:600}}
+.mem-recur{{font-size:10px;color:#818cf8}}
+.mem-hyp{{border-left:3px solid #eab308}}
+.mem-hyp .mem-top .mem-status[style*="22c55e"]~.mem-conf{{color:#22c55e}}
+.mem-archived{{opacity:0.5;border-style:dashed}}
+.mem-archived .mem-content{{color:#64748b}}
+.mem-archive-section{{max-height:300px;overflow-y:auto}}
+.conf-bar{{width:60px;height:6px;background:#1e293b;border-radius:3px;overflow:hidden}}
+.conf-fill{{height:100%;background:#22c55e;border-radius:3px;transition:width 0.3s}}
 </style>
 </head>
 <body>
@@ -1407,6 +1560,7 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
         <button class="tab" onclick="showTab('journal',this)">Journal</button>
         <button class="tab" onclick="showTab('reminders',this)">Reminders{f' <span class="tab-badge">{len(reminders)}</span>' if reminders else ''}</button>
         <button class="tab" onclick="showTab('memos',this)">Memos</button>
+        <button class="tab" onclick="showTab('memory',this)">Memory{f' <span class="tab-badge">{memory_count}</span>' if memory_count else ''}</button>
         <button class="tab" onclick="showTab('trash',this)">Trash{f' <span class="tab-badge">{trash_count}</span>' if trash_count else ''}</button>
         <button class="tab" onclick="showTab('settings',this)">Settings</button>
     </div>
@@ -1489,6 +1643,10 @@ body{{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--
 
     <div id="memos" class="tc">
         {memos_html}
+    </div>
+
+    <div id="memory" class="tc">
+        {memory_html}
     </div>
 
     <div id="trash" class="tc">
@@ -1679,6 +1837,7 @@ async function addMemoTopic(){{
 async function toggleMemoTopic(id,active){{await api('PUT','/dashboard/api/memo-topics/'+id,{{is_active:active}})}}
 async function deleteMemoTopic(id){{if(!confirm('Delete this memo topic? Linked entries will be kept but unlinked.'))return;await api('DELETE','/dashboard/api/memo-topics/'+id);fadeOut('memo-topic-'+id);setTimeout(()=>location.reload(),400)}}
 function _esc(s){{return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}}
+async function deleteMemory(type,id){{if(!confirm('Delete this memory?'))return;const r=await api('DELETE',`/dashboard/api/memory/${{type}}/${{id}}`);if(r.ok)fadeOut(`mem-${{type}}-${{id}}`);else alert(r.error||'Failed to delete')}}
 </script>
 </body>
 </html>'''
