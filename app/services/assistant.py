@@ -18,6 +18,7 @@ from app.config import settings
 from app.models import User, ConversationMessage, MemoTopic
 from app.services.clients import anthropic_client
 from app.services.tools import TOOLS, execute_tool
+from app.services.memory import get_relevant_memories, COMPACTION_THRESHOLD
 
 logger = logging.getLogger("planner.assistant")
 
@@ -33,8 +34,8 @@ class AssistantResponse:
     images: list = field(default_factory=list)  # list of image bytes
 
 
-def _build_system_prompt(user: User, memo_topics: list = None) -> str:
-    """Build the assistant system prompt with user context."""
+def _build_system_prompt(user: User, memo_topics: list = None, memory_context: str = None) -> str:
+    """Build the assistant system prompt with user context and memories."""
     tz = ZoneInfo(settings.timezone)
     now = datetime.now(tz)
 
@@ -101,6 +102,14 @@ When you use tools to create tasks, calendar events, journal entries, memos, or 
 ## Memo topics
 The user tracks these topics. When creating memos, if content relates to a topic, mention it.
 {chr(10).join(topic_lines)}"""
+
+    if memory_context:
+        prompt += f"""
+
+{memory_context}
+
+When you notice something about {user.name} that seems like a pattern or when they correct you, use the memory tools (recall_memories, correct_belief, forget_memory) as appropriate.
+Never state hypotheses as certain facts. Use language like "I've noticed..." or "It seems like..." for inferred patterns."""
 
     return prompt
 
@@ -191,7 +200,15 @@ def run(
         MemoTopic.user_id == user.id, MemoTopic.is_active == True
     ).all() if db else []
 
-    system_prompt = _build_system_prompt(user, memo_topics if memo_topics else None)
+    # Retrieve relevant memories for context injection
+    memory_context = ""
+    if db:
+        try:
+            memory_context = get_relevant_memories(user, message_text or "", db)
+        except Exception as e:
+            logger.warning(f"Memory retrieval failed (non-fatal): {e}")
+
+    system_prompt = _build_system_prompt(user, memo_topics if memo_topics else None, memory_context or None)
 
     # Load conversation history (only for persistent sessions)
     is_persistent = not session_id.startswith("api:")
@@ -291,6 +308,33 @@ def run(
     # Persist assistant response for persistent sessions
     if is_persistent:
         _persist_message(db, user, session_id, "assistant", final_text)
+
+    # Trigger memory consolidation for persistent sessions (every 10 messages)
+    if is_persistent and db:
+        try:
+            msg_count = db.query(ConversationMessage).filter(
+                ConversationMessage.user_id == user.id,
+                ConversationMessage.session_id == session_id,
+            ).count()
+            # Consolidate every 10 user messages (roughly every 5 exchanges)
+            if msg_count > 0 and msg_count % 10 == 0:
+                import asyncio
+                from app.services.memory import consolidate_session, compact_memories
+                from app.models import ProfileMemory
+                logger.info(f"Triggering consolidation for session {session_id} ({msg_count} messages)")
+                asyncio.ensure_future(consolidate_session(user, session_id, db))
+
+                # Run compaction if memory count is getting high (every 50 messages)
+                if msg_count % 50 == 0:
+                    profile_count = db.query(ProfileMemory).filter(
+                        ProfileMemory.user_id == user.id,
+                        ProfileMemory.status == "active",
+                    ).count()
+                    if profile_count > COMPACTION_THRESHOLD:
+                        logger.info(f"Triggering compaction ({profile_count} active profiles)")
+                        asyncio.ensure_future(compact_memories(user, db))
+        except Exception as e:
+            logger.warning(f"Consolidation trigger failed (non-fatal): {e}")
 
     logger.info(f"Assistant done: {len(all_entry_ids)} entries, modules: {all_modules}")
 

@@ -172,6 +172,76 @@ class Reminder(Base):
     user = relationship("User")
 
 
+class ProfileMemory(Base):
+    """Stable facts about the user: identity, preferences, relationships, projects."""
+    __tablename__ = "profile_memories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    content = Column(Text, nullable=False)                          # 20-80 tokens
+    category = Column(String, nullable=False, default="General", index=True)  # identity, preference, relationship, project, etc.
+    confidence = Column(Float, nullable=False, default=1.0)         # 1.0 = user-stated, lower = inferred
+    source = Column(String, nullable=False, default="explicit")     # explicit (user said it) or inferred
+    tags = Column(String, nullable=True)                            # comma-separated
+    source_session_id = Column(String, nullable=True)               # session that created this
+    status = Column(String, nullable=False, default="active", index=True)  # active, outdated, deleted
+    last_confirmed = Column(DateTime, nullable=True)                # last time evidence supported this
+    superseded_by_id = Column(Integer, nullable=True)               # FK to newer ProfileMemory
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
+
+
+class EpisodicMemory(Base):
+    """Notable events or recurring situations, clustered from conversation history."""
+    __tablename__ = "episodic_memories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    summary = Column(Text, nullable=False)                          # 50-120 tokens
+    time_start = Column(DateTime, nullable=True)                    # when the episode began
+    time_end = Column(DateTime, nullable=True)                      # when it ended (ongoing if null)
+    recurrence_count = Column(Integer, nullable=False, default=1)   # how many times this has come up
+    importance = Column(Float, nullable=False, default=0.5)         # 0-1, decays over time
+    tags = Column(String, nullable=True)                            # comma-separated
+    source_session_ids = Column(Text, nullable=True)                # JSON array of session_ids
+    status = Column(String, nullable=False, default="active", index=True)  # active, decayed, archived
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
+
+
+class HypothesisMemory(Base):
+    """Inferred patterns about user behavior with uncertainty tracking."""
+    __tablename__ = "hypothesis_memories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    short_summary = Column(Text, nullable=False)                    # 30-50 tokens, for ranking/injection
+    long_summary = Column(Text, nullable=False)                     # 80-140 tokens, for full context
+    confidence = Column(Float, nullable=False, default=0.3)         # starts low
+    evidence_for = Column(Integer, nullable=False, default=1)       # supporting instances
+    evidence_against = Column(Integer, nullable=False, default=0)   # contradicting instances
+    category = Column(String, nullable=True)                        # behavioral, emotional, preference, relational
+    tags = Column(String, nullable=True)                            # comma-separated
+    source_session_ids = Column(Text, nullable=True)                # JSON array of session_ids
+    status = Column(String, nullable=False, default="provisional", index=True)  # provisional, active, challenged, superseded
+    superseded_by_id = Column(Integer, nullable=True)               # FK to newer HypothesisMemory
+    last_confirmed = Column(DateTime, nullable=True)                # last time evidence supported this
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User")
+
+
 class NotificationContact(Base):
     __tablename__ = "notification_contacts"
 

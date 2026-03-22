@@ -14,6 +14,7 @@ from sqlalchemy import or_
 
 from app.models import (
     User, Entry, Task, CalendarEvent, RememberItem, JournalEntry, MemoTopic, Reminder,
+    ProfileMemory, EpisodicMemory, HypothesisMemory,
 )
 from app.config import settings
 from app.modules.memo import handle_memo
@@ -236,6 +237,42 @@ TOOLS = [
             "required": ["scene"],
         },
     },
+    # ── Memory tools ──
+    {
+        "name": "recall_memories",
+        "description": "Search your layered memory system for information about the user — profile facts, past episodes, and behavioral patterns. Use when you want to check what you know about something the user mentions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for in memory"},
+                "module": {"type": "string", "enum": ["profile", "episodic", "hypothesis"], "description": "Limit search to a specific memory module (optional)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "correct_belief",
+        "description": "The user is correcting something you believe about them. Use when they say 'that's not right', 'actually I...', 'no, I...' in response to something you assumed or remembered incorrectly.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "belief_summary": {"type": "string", "description": "The incorrect belief to find and correct"},
+                "correction": {"type": "string", "description": "What is actually true"},
+            },
+            "required": ["belief_summary", "correction"],
+        },
+    },
+    {
+        "name": "forget_memory",
+        "description": "Remove a specific memory when the user asks you to forget something. Cascades to any hypotheses built on the forgotten information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "memory_description": {"type": "string", "description": "Description of what to forget"},
+            },
+            "required": ["memory_description"],
+        },
+    },
 ]
 
 
@@ -279,6 +316,12 @@ def execute_tool(
             return _exec_delete_reminder(tool_input, user, db)
         elif tool_name == "generate_self_image":
             return _exec_generate_self_image(tool_input)
+        elif tool_name == "recall_memories":
+            return _exec_recall_memories(tool_input, user, db)
+        elif tool_name == "correct_belief":
+            return _exec_correct_belief(tool_input, user, db)
+        elif tool_name == "forget_memory":
+            return _exec_forget_memory(tool_input, user, db)
         else:
             return ToolResult(content=f"Unknown tool: {tool_name}")
     except Exception as e:
@@ -647,3 +690,28 @@ def _exec_generate_self_image(tool_input):
             return ToolResult(content="Image generation returned no data. Check logs for details.")
     except Exception as e:
         return ToolResult(content=f"Image generation error: {e}")
+
+
+# ─── Memory Tool Executors ──────────────────────────────────
+
+def _exec_recall_memories(tool_input, user, db):
+    from app.services.memory import search_memories
+    query = tool_input.get("query", "")
+    module = tool_input.get("module")
+    result = search_memories(user, query, db, module)
+    return ToolResult(content=result, module="memory")
+
+
+def _exec_correct_belief(tool_input, user, db):
+    from app.services.memory import correct_belief
+    belief = tool_input.get("belief_summary", "")
+    correction = tool_input.get("correction", "")
+    result = correct_belief(user, belief, correction, db)
+    return ToolResult(content=result, module="memory")
+
+
+def _exec_forget_memory(tool_input, user, db):
+    from app.services.memory import forget_memory
+    description = tool_input.get("memory_description", "")
+    result = forget_memory(user, description, db)
+    return ToolResult(content=result, module="memory")
