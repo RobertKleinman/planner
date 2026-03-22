@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI):
                     await send_due_reminders()
                 except Exception as e:
                     logger.error(f"Reminder check failed: {e}", exc_info=True)
-                await asyncio.sleep(300)  # every 5 minutes
+                await asyncio.sleep(60)  # every 1 minute
 
         import asyncio
         reminder_task = asyncio.create_task(_reminder_loop())
