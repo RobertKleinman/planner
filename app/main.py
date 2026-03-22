@@ -217,12 +217,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.staticfiles import StaticFiles
 from app.routers import input, entries, dashboard, search, tamagotchi
 app.include_router(input.router)
 app.include_router(entries.router)
 app.include_router(dashboard.router)
 app.include_router(search.router)
 app.include_router(tamagotchi.router)
+
+# Serve static files (sprites, etc.)
+import os
+_static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
+if os.path.exists(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 if settings.telegram_bot_token:
     from app.routers import telegram
