@@ -316,13 +316,12 @@ def run(
                 ConversationMessage.user_id == user.id,
                 ConversationMessage.session_id == session_id,
             ).count()
-            # Consolidate every 10 user messages (roughly every 5 exchanges)
-            if msg_count > 0 and msg_count % 10 == 0:
-                import asyncio
+            # Consolidate every 4 messages (roughly every 2 exchanges)
+            if msg_count > 0 and msg_count % 4 == 0:
                 from app.services.memory import consolidate_session, compact_memories
                 from app.models import ProfileMemory
                 logger.info(f"Triggering consolidation for session {session_id} ({msg_count} messages)")
-                asyncio.ensure_future(consolidate_session(user, session_id, db))
+                consolidate_session(user, session_id, db)
 
                 # Run compaction if memory count is getting high (every 50 messages)
                 if msg_count % 50 == 0:
@@ -332,7 +331,7 @@ def run(
                     ).count()
                     if profile_count > COMPACTION_THRESHOLD:
                         logger.info(f"Triggering compaction ({profile_count} active profiles)")
-                        asyncio.ensure_future(compact_memories(user, db))
+                        compact_memories(user, db)
         except Exception as e:
             logger.warning(f"Consolidation trigger failed (non-fatal): {e}")
 

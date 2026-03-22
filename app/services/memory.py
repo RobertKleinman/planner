@@ -253,7 +253,7 @@ CONSOLIDATION_TOOLS = [
 ]
 
 
-async def consolidate_session(user: User, session_id: str, db: Session):
+def consolidate_session(user: User, session_id: str, db: Session):
     """
     End-of-session consolidation: extract facts, episodes, and hypotheses
     from the conversation. Called when session ends.
@@ -684,7 +684,7 @@ def decay_old_memories(user: User, db: Session):
 COMPACTION_THRESHOLD = 30  # run compaction when a module exceeds this many active records
 
 
-async def compact_memories(user: User, db: Session):
+def compact_memories(user: User, db: Session):
     """
     Compact the memory store: merge duplicates, absorb near-duplicates,
     archive low-value memories. Uses one LLM call per module that needs it.
@@ -708,19 +708,19 @@ async def compact_memories(user: User, db: Session):
     ).count()
 
     if profile_count > COMPACTION_THRESHOLD:
-        stats["profiles"] = await _compact_profiles(user, db)
+        stats["profiles"] = _compact_profiles(user, db)
 
     if episode_count > COMPACTION_THRESHOLD:
-        stats["episodes"] = await _compact_episodes(user, db)
+        stats["episodes"] = _compact_episodes(user, db)
 
     if hypothesis_count > COMPACTION_THRESHOLD:
-        stats["hypotheses"] = await _compact_hypotheses(user, db)
+        stats["hypotheses"] = _compact_hypotheses(user, db)
 
     logger.info(f"Compaction complete: {stats}")
     return stats
 
 
-async def _compact_profiles(user: User, db: Session) -> int:
+def _compact_profiles(user: User, db: Session) -> int:
     """Merge redundant profile facts via LLM."""
     profiles = db.query(ProfileMemory).filter(
         ProfileMemory.user_id == user.id,
@@ -792,7 +792,7 @@ Rules:
     return removed
 
 
-async def _compact_episodes(user: User, db: Session) -> int:
+def _compact_episodes(user: User, db: Session) -> int:
     """Merge related episodes and archive old low-importance ones."""
     episodes = db.query(EpisodicMemory).filter(
         EpisodicMemory.user_id == user.id,
@@ -860,7 +860,7 @@ Rules:
     return removed
 
 
-async def _compact_hypotheses(user: User, db: Session) -> int:
+def _compact_hypotheses(user: User, db: Session) -> int:
     """Merge overlapping hypotheses and archive weak ones."""
     hypotheses = db.query(HypothesisMemory).filter(
         HypothesisMemory.user_id == user.id,
