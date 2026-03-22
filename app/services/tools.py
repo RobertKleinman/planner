@@ -565,7 +565,7 @@ def _exec_create_reminder(tool_input, user, db):
     remind_at = dt.fromisoformat(remind_at_str)
     # Convert to UTC if timezone-aware
     if remind_at.tzinfo:
-        remind_at = remind_at.astimezone(timezone).replace(tzinfo=None)
+        remind_at = remind_at.astimezone(timezone.utc).replace(tzinfo=None)
 
     reminder = Reminder(
         user_id=user.id,
@@ -578,7 +578,7 @@ def _exec_create_reminder(tool_input, user, db):
 
     recur_text = f" (repeats {recurring})" if recurring else ""
     tz = ZoneInfo(settings.timezone)
-    local_time = remind_at.replace(tzinfo=timezone).astimezone(tz)
+    local_time = remind_at.replace(tzinfo=timezone.utc).astimezone(tz)
 
     return ToolResult(
         content=f"Reminder set (ID: {reminder.id}): '{message}' at {local_time.strftime('%a %b %d, %I:%M %p')}{recur_text}",
@@ -604,7 +604,7 @@ def _exec_get_reminders(user, db):
     tz = ZoneInfo(settings.timezone)
     lines = []
     for r in reminders:
-        local_time = r.remind_at.replace(tzinfo=timezone).astimezone(tz)
+        local_time = r.remind_at.replace(tzinfo=timezone.utc).astimezone(tz)
         recur = f" [{r.recurring}]" if r.recurring else ""
         lines.append(f"- (ID: {r.id}) {r.message} — {local_time.strftime('%a %b %d, %I:%M %p')}{recur}")
 
