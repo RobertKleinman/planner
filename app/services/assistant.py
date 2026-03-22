@@ -37,7 +37,7 @@ class AssistantResponse:
     is_persistent: bool = False
 
 
-def _build_system_prompt(user: User, memo_topics: list = None, memory_context: str = None, session_summary: str = None) -> str:
+def _build_system_prompt(user: User, memo_topics: list = None, memory_context: str = None, session_summary: str = None, world_context: str = None) -> str:
     """Build the assistant system prompt with user context, memories, and session summary."""
     tz = ZoneInfo(settings.timezone)
     now = datetime.now(tz)
@@ -112,6 +112,11 @@ The user tracks these topics. When creating memos, if content relates to a topic
 ## Conversation so far
 {session_summary}"""
 
+    if world_context:
+        prompt += f"""
+
+{world_context}"""
+
     if memory_context:
         prompt += f"""
 
@@ -180,6 +185,7 @@ def run(
     Consolidation is NOT done here — caller dispatches it after response.
     """
     from app.services.memory import get_relevant_memories, get_session_context
+    from app.services.inner_life import get_world_snapshot
 
     # Load memo topics for system prompt
     memo_topics = db.query(MemoTopic).filter(
@@ -202,11 +208,20 @@ def run(
     else:
         history = []
 
+    # Load Zeph's inner world
+    world_context = ""
+    if db:
+        try:
+            world_context = get_world_snapshot(db)
+        except Exception as e:
+            logger.warning(f"Inner life retrieval failed (non-fatal): {e}")
+
     system_prompt = _build_system_prompt(
         user,
         memo_topics if memo_topics else None,
         memory_context or None,
         session_summary,
+        world_context or None,
     )
 
     # Build the new user message

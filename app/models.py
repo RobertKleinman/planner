@@ -278,6 +278,45 @@ class ConsolidationCheckpoint(Base):
     user = relationship("User")
 
 
+# ─── Zeph's Inner Life (isolated module) ─────────────────────
+
+class ZephWorldObject(Base):
+    """A character, creature, or place in Zeph's inner world."""
+    __tablename__ = "zeph_world_objects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)                           # "Nyx", "Maren", "The Tower"
+    object_type = Column(String, nullable=False)                    # dog, friend, place
+    identity = Column(Text, nullable=False)                         # core personality, 2-3 sentences (static)
+    constraints = Column(Text, nullable=False)                      # what this object can/can't do
+    current_state = Column(Text, nullable=False, default="{}")      # JSON: mood, activity, location (~30 tokens)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+
+class ZephWorldEvent(Base):
+    """A micro-event that happened in Zeph's inner world."""
+    __tablename__ = "zeph_world_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    object_id = Column(Integer, ForeignKey("zeph_world_objects.id"), nullable=False)
+    event = Column(Text, nullable=False)                            # what happened (~20-40 tokens)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    world_object = relationship("ZephWorldObject")
+
+
+class ZephWorldSnapshot(Base):
+    """Periodic snapshot of the full world state for prompt injection."""
+    __tablename__ = "zeph_world_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot = Column(Text, nullable=False)                         # formatted world state (~200-300 tokens)
+    last_tick_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class NotificationContact(Base):
     __tablename__ = "notification_contacts"
 

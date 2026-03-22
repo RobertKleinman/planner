@@ -82,6 +82,16 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"FK migration skipped (table may not exist yet): {e}")
 
+    # Seed Zeph's inner world if not already seeded
+    try:
+        from app.database import SessionLocal as _SeedSession
+        from app.services.inner_life import seed_world
+        _seed_db = _SeedSession()
+        seed_world(_seed_db)
+        _seed_db.close()
+    except Exception as e:
+        logger.warning(f"Inner life seeding failed (non-fatal): {e}")
+
     logger.info("Database tables created/verified")
     logger.info(f"Google Calendar: {'connected' if is_google_connected() else 'not connected'}")
     logger.info(f"Twilio SMS: {'configured' if is_twilio_configured() else 'not configured'}")
@@ -155,6 +165,15 @@ async def lifespan(app: FastAPI):
 
                         # Recovery sweep for stranded sessions
                         recovery_sweep(maint_db)
+
+                        # Zeph's inner world simulation tick
+                        try:
+                            from app.services.inner_life import should_tick, simulate_tick
+                            if should_tick(maint_db):
+                                logger.info("Running inner life simulation tick")
+                                simulate_tick(maint_db)
+                        except Exception as e:
+                            logger.error(f"Inner life tick failed: {e}", exc_info=True)
 
                     finally:
                         maint_db.close()
