@@ -282,6 +282,7 @@ body { background: #0a0e17; display: flex; justify-content: center; align-items:
 .briar-sleeping .briar-sprite { animation: breathe 4s ease-in-out infinite; }
 .briar-sitting .briar-sprite { animation: breathe 5s ease-in-out infinite; }
 .briar-following .briar-sprite { animation: bob 0.8s ease-in-out infinite; }
+.briar-eating .briar-sprite { animation: bob 1.5s ease-in-out infinite; }
 
 /* Info bar */
 .info-bar {
