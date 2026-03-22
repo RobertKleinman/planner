@@ -540,15 +540,20 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
     """Process a single tool call from the consolidation LLM. No commit — caller handles transaction."""
     try:
         if tool_name == "save_profile_fact":
-            # Duplicate check
-            existing = db.query(ProfileMemory).filter(
-                ProfileMemory.user_id == user.id,
-                ProfileMemory.status == "active",
-                ProfileMemory.content.ilike(f"%{tool_input['content'][:50]}%"),
-            ).first()
-            if existing:
-                logger.info(f"Skipping duplicate profile fact: {tool_input['content'][:60]}")
-                return
+            # Duplicate check — match on key words from the new content
+            content_words = _extract_keywords(tool_input["content"])
+            if content_words:
+                # Check if any existing fact shares 3+ keywords
+                existing_profiles = db.query(ProfileMemory).filter(
+                    ProfileMemory.user_id == user.id,
+                    ProfileMemory.status == "active",
+                ).all()
+                for ep in existing_profiles:
+                    ep_words = set(_extract_keywords(ep.content))
+                    overlap = len(set(content_words) & ep_words)
+                    if overlap >= 3 or (overlap >= 2 and len(content_words) <= 4):
+                        logger.info(f"Skipping duplicate profile fact: {tool_input['content'][:60]}")
+                        return
 
             db.add(ProfileMemory(
                 user_id=user.id,
@@ -562,12 +567,19 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
             ))
 
         elif tool_name == "save_episode":
-            # Duplicate check for episodes
-            existing = db.query(EpisodicMemory).filter(
-                EpisodicMemory.user_id == user.id,
-                EpisodicMemory.status == "active",
-                EpisodicMemory.summary.ilike(f"%{tool_input['summary'][:50]}%"),
-            ).first()
+            # Duplicate check for episodes — keyword overlap
+            summary_words = set(_extract_keywords(tool_input["summary"]))
+            existing = None
+            if summary_words:
+                for ep in db.query(EpisodicMemory).filter(
+                    EpisodicMemory.user_id == user.id,
+                    EpisodicMemory.status == "active",
+                ).all():
+                    ep_words = set(_extract_keywords(ep.summary))
+                    overlap = len(summary_words & ep_words)
+                    if overlap >= 3 or (overlap >= 2 and len(summary_words) <= 4):
+                        existing = ep
+                        break
             if existing:
                 # Update recurrence instead of duplicating
                 existing.recurrence_count += 1
@@ -585,15 +597,19 @@ def _process_consolidation_tool(tool_name: str, tool_input: dict, user: User, se
             ))
 
         elif tool_name == "propose_hypothesis":
-            # Duplicate check for hypotheses
-            existing = db.query(HypothesisMemory).filter(
-                HypothesisMemory.user_id == user.id,
-                HypothesisMemory.status.in_(["provisional", "active"]),
-                or_(
-                    HypothesisMemory.short_summary.ilike(f"%{tool_input['short_summary'][:40]}%"),
-                    HypothesisMemory.long_summary.ilike(f"%{tool_input['short_summary'][:40]}%"),
-                ),
-            ).first()
+            # Duplicate check for hypotheses — keyword overlap
+            hyp_words = set(_extract_keywords(tool_input["short_summary"]))
+            existing = None
+            if hyp_words:
+                for h in db.query(HypothesisMemory).filter(
+                    HypothesisMemory.user_id == user.id,
+                    HypothesisMemory.status.in_(["provisional", "active"]),
+                ).all():
+                    h_words = set(_extract_keywords(h.short_summary))
+                    overlap = len(hyp_words & h_words)
+                    if overlap >= 2:
+                        existing = h
+                        break
             if existing:
                 # Treat as supporting evidence
                 existing.evidence_for += 1
@@ -883,12 +899,22 @@ def decay_old_memories(user: User, db: Session):
             HypothesisMemory.last_confirmed < cutoff,
         ),
     ).all()
+    now = datetime.now(timezone.utc)
     for hyp in old_hypotheses:
         if hyp.last_confirmed:
-            days_since = (datetime.now(timezone.utc) - hyp.last_confirmed).days
+            ref_date = hyp.last_confirmed
+        elif hyp.created_at:
+            ref_date = hyp.created_at
         else:
-            # Never confirmed — use created_at for decay calculation
-            days_since = (datetime.now(timezone.utc) - hyp.created_at).days if hyp.created_at else 180
+            ref_date = None
+
+        if ref_date:
+            # Handle tz-naive datetimes from SQLite
+            if ref_date.tzinfo is None:
+                ref_date = ref_date.replace(tzinfo=timezone.utc)
+            days_since = (now - ref_date).days
+        else:
+            days_since = 180
         decay = max(0.5, 1.0 - (days_since / 180))
         base = hyp.evidence_for / (hyp.evidence_for + hyp.evidence_against) if (hyp.evidence_for + hyp.evidence_against) > 0 else 0.5
         hyp.confidence = round(base * decay, 2)
