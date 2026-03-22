@@ -532,6 +532,61 @@ function renderScene(data) {
     const roomLabels = { study: 'Study', kitchen: 'Kitchen', outside: 'Cliff Path' };
     info.textContent = (timeLabels[data.time_of_day] || '') + '  •  ' + (roomLabels[data.room] || data.room) + '  •  ' + data.weather;
     flavor.textContent = data.flavor || '';
+
+    // Start Briar roaming
+    startRoaming(data.room, data.briar_activity);
+}
+
+// Briar roaming — wanders between safe points in each room
+const ROAM_ZONES = {
+    study:   [{l:130,b:22}, {l:170,b:22}, {l:200,b:22}, {l:220,b:22}, {l:150,b:22}],
+    kitchen: [{l:50,b:22}, {l:100,b:22}, {l:150,b:22}, {l:180,b:22}, {l:70,b:22}],
+    outside: [{l:200,b:22}, {l:220,b:25}, {l:240,b:22}, {l:260,b:22}, {l:210,b:28}],
+};
+
+let _roamInterval = null;
+let _currentRoom = 'study';
+let _briarState = 'sleeping';
+
+function startRoaming(room, briarActivity) {
+    _currentRoom = room;
+    _briarState = briarActivity;
+
+    if (_roamInterval) clearInterval(_roamInterval);
+
+    // Only roam when not sleeping
+    if (briarActivity === 'sleeping') return;
+
+    const zones = ROAM_ZONES[room] || ROAM_ZONES.study;
+    const briar = document.getElementById('briar');
+    const sprite = briar.querySelector('.briar-sprite');
+
+    _roamInterval = setInterval(function() {
+        // Pick a random safe point
+        const target = zones[Math.floor(Math.random() * zones.length)];
+        const currentL = parseInt(briar.style.left) || target.l;
+
+        // Flip sprite based on movement direction
+        if (target.l < currentL) {
+            sprite.style.transform = 'scaleX(-1)';
+        } else if (target.l > currentL) {
+            sprite.style.transform = 'scaleX(1)';
+        }
+
+        // Smooth transition to new position
+        briar.style.transition = 'left 3s ease-in-out, bottom 2s ease-in-out';
+        briar.style.left = target.l + 'px';
+        briar.style.bottom = target.b + 'px';
+
+        // Temporarily switch to following sprite during movement
+        if (_briarState !== 'following') {
+            trySprite(sprite, 'briar/following');
+            setTimeout(function() {
+                trySprite(sprite, 'briar/' + _briarState);
+                sprite.style.transform = '';
+            }, 3000);
+        }
+    }, 6000 + Math.random() * 4000); // every 6-10 seconds
 }
 
 async function fetchScene() {
