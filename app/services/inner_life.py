@@ -460,3 +460,100 @@ Return [] if the response contains no new fictional details worth saving — don
 
     except Exception as e:
         logger.error(f"World detail extraction failed: {e}", exc_info=True)
+
+
+# ─── Tamagotchi Scene Engine ─────────────────────────────────
+
+# Deterministic schedule: hour → (room, zeph_activity, briar_activity)
+_SCHEDULE = {
+    # Early morning
+    (6, 7):   ("kitchen",  "eating",   "sitting"),
+    (7, 8):   ("kitchen",  "eating",   "eating"),
+    # Morning work
+    (8, 10):  ("study",    "reading",  "sleeping"),
+    (10, 12): ("study",    "writing",  "sleeping"),
+    # Lunch
+    (12, 13): ("kitchen",  "eating",   "sitting"),
+    # Afternoon — varies
+    (13, 15): ("study",    "magic",    "sitting"),
+    (15, 17): ("outside",  "walking",  "following"),
+    # Evening
+    (17, 19): ("outside",  "sitting",  "following"),
+    (19, 21): ("study",    "reading",  "sleeping"),
+    # Night
+    (21, 23): ("study",    "reading",  "sleeping"),
+    (23, 6):  ("study",    "sleeping", "sleeping"),
+}
+
+
+def get_current_scene(db: Session = None, user_timezone: str = "America/Toronto") -> dict:
+    """
+    Get the current tamagotchi scene based on time of day and world state.
+    Returns a dict with room, zeph activity, briar activity, time info, weather.
+    """
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(user_timezone)
+    now = datetime.now(tz)
+    hour = now.hour
+
+    # Find matching schedule slot
+    room = "study"
+    zeph_activity = "reading"
+    briar_activity = "sleeping"
+
+    for (start, end), (r, z, b) in _SCHEDULE.items():
+        if start <= end:
+            if start <= hour < end:
+                room, zeph_activity, briar_activity = r, z, b
+                break
+        else:
+            # Wraps midnight (e.g., 23-6)
+            if hour >= start or hour < end:
+                room, zeph_activity, briar_activity = r, z, b
+                break
+
+    # Time of day for lighting
+    if 6 <= hour < 8:
+        time_of_day = "dawn"
+    elif 8 <= hour < 17:
+        time_of_day = "day"
+    elif 17 <= hour < 20:
+        time_of_day = "dusk"
+    else:
+        time_of_day = "night"
+
+    # Get weather from tower state
+    weather = "overcast"
+    if db:
+        try:
+            tower = db.query(ZephWorldObject).filter(ZephWorldObject.name == "The Tower").first()
+            if tower:
+                state = json.loads(tower.current_state or "{}")
+                weather = state.get("weather", "overcast")
+        except Exception:
+            pass
+
+    # Get recent event for flavor text
+    flavor = ""
+    if db:
+        try:
+            latest_event = (
+                db.query(ZephWorldEvent)
+                .order_by(ZephWorldEvent.created_at.desc())
+                .first()
+            )
+            if latest_event:
+                flavor = latest_event.event.replace("[improvised] ", "")
+        except Exception:
+            pass
+
+    return {
+        "room": room,
+        "zeph_activity": zeph_activity,
+        "briar_activity": briar_activity,
+        "time_of_day": time_of_day,
+        "hour": hour,
+        "weather": weather,
+        "flavor": flavor,
+    }
