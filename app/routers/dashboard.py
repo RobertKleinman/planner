@@ -896,7 +896,8 @@ def _render(user, open_tasks, done_tasks, upcoming, past_ev, memos, remember_ite
     if hypothesis_memories:
         for h in hypothesis_memories:
             conf_pct = int(h.confidence * 100)
-            status_color = {{"provisional": "#eab308", "active": "#22c55e", "challenged": "#ef4444"}}.get(h.status, "#6b7280")
+            _hyp_colors = {"provisional": "#eab308", "active": "#22c55e", "challenged": "#ef4444"}
+            status_color = _hyp_colors.get(h.status, "#6b7280")
             evidence_text = f"+{h.evidence_for} / -{h.evidence_against}"
             hypothesis_html += f'''<div class="mem-item mem-hyp" id="mem-hyp-{h.id}">
                 <div class="mem-top">
