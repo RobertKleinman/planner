@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import User, ConversationMessage, MemoTopic
 from app.services.clients import anthropic_client
-from app.services.tools import TOOLS, execute_tool
+from app.services.tools import TOOLS, execute_tool, get_tools_for_message
 
 logger = logging.getLogger("planner.assistant")
 
@@ -212,6 +212,13 @@ def run(
     # Build messages array for Claude
     messages = history + [{"role": "user", "content": user_content}]
 
+    # Select tools based on message content (saves ~500 tokens on most requests)
+    selected_tools = get_tools_for_message(message_text)
+
+    # Add cache_control to the last tool for prompt caching
+    cached_tools = list(selected_tools)
+    cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+
     # Tool execution loop
     all_entry_ids = []
     all_modules = []
@@ -219,11 +226,6 @@ def run(
 
     for round_num in range(MAX_TOOL_ROUNDS):
         logger.info(f"Assistant round {round_num + 1} for {user.name} (session: {session_id})")
-
-        # Add cache_control to the last tool so everything up to and
-        # including tool definitions is cached (~2000 tokens, identical every request)
-        cached_tools = TOOLS.copy()
-        cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
 
         # System prompt as cacheable blocks — static personality cached,
         # dynamic memory/summary not cached

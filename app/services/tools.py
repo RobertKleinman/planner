@@ -36,7 +36,34 @@ class ToolResult:
 
 # ─── Tool Definitions (Anthropic format) ─────────────────────
 
-TOOLS = [
+# Keywords that trigger inclusion of optional tool groups
+_REMINDER_KEYWORDS = {"remind", "reminder", "ping", "alert", "notify", "don't forget", "don't let me forget", "set a reminder", "cancel reminder", "delete reminder", "my reminders"}
+_IMAGE_KEYWORDS = {"picture", "image", "photo", "selfie", "show me", "what do you look like", "see you", "show yourself", "draw", "generate"}
+_MEMORY_KEYWORDS = {"remember", "recall", "forget", "memory", "memories", "believe", "belief", "what do you know", "correct", "wrong about me"}
+
+
+def get_tools_for_message(message_text: str = "") -> list:
+    """Return only the tools relevant to this message. Saves ~500 tokens on most requests."""
+    tools = list(CORE_TOOLS)  # always included
+
+    msg_lower = (message_text or "").lower()
+
+    if any(kw in msg_lower for kw in _REMINDER_KEYWORDS):
+        tools.extend(REMINDER_TOOLS)
+
+    if any(kw in msg_lower for kw in _IMAGE_KEYWORDS):
+        tools.extend(IMAGE_TOOLS)
+
+    if any(kw in msg_lower for kw in _MEMORY_KEYWORDS):
+        tools.extend(MEMORY_TOOLS)
+
+    return tools
+
+
+# All tools combined (for backwards compatibility and tool execution dispatch)
+TOOLS = []  # populated after definitions below
+
+CORE_TOOLS = [
     # ── Write tools ──
     {
         "name": "create_memo",
@@ -185,7 +212,9 @@ TOOLS = [
             },
         },
     },
-    # ── Reminder tools ──
+]
+
+REMINDER_TOOLS = [
     {
         "name": "create_reminder",
         "description": "Set a reminder to ping the user at a specific time. Use when they say 'remind me', 'don't let me forget', 'ping me about', etc. Also PROACTIVELY SUGGEST reminders when the user mentions something time-sensitive — ask them first before creating.",
@@ -222,7 +251,9 @@ TOOLS = [
             "required": ["reminder_id"],
         },
     },
-    # ── Zeph tools ──
+]
+
+IMAGE_TOOLS = [
     {
         "name": "generate_self_image",
         "description": "Generate an image of yourself (Zeph). Use when the user asks to see you, asks what you're doing, asks for a picture, or when it naturally fits the conversation and would be charming or fun. You are a male elf with tousled hair, pointed ears, open shirt, dark pants, barefoot — dark fantasy aesthetic with candlelight, books, and ink wisps.",
@@ -237,7 +268,9 @@ TOOLS = [
             "required": ["scene"],
         },
     },
-    # ── Memory tools ──
+]
+
+MEMORY_TOOLS = [
     {
         "name": "recall_memories",
         "description": "Search your layered memory system for information about the user — profile facts, past episodes, and behavioral patterns. Use when you want to check what you know about something the user mentions.",
@@ -274,6 +307,9 @@ TOOLS = [
         },
     },
 ]
+
+# Combined list for tool execution dispatch (all tools must be executable)
+TOOLS = CORE_TOOLS + REMINDER_TOOLS + IMAGE_TOOLS + MEMORY_TOOLS
 
 
 # ─── Tool Execution ──────────────────────────────────────────
