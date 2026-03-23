@@ -37,49 +37,49 @@ OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 # Character base prompt elements
 ZEPH_BASE = "anime illustration, single male elf, pointy ears, messy dark hair, pale skin, handsome, slim build, loose white medieval shirt, dark fitted pants, barefoot, dark fantasy aesthetic"
 BRIAR_BASE = "anime illustration, single large scruffy wolfhound dog, shaggy grey-brown fur, one torn ear, loyal gentle expression, dark fantasy aesthetic"
-NEGATIVE = "blurry, low quality, jpeg artifacts, watermark, text, signature, multiple characters, crowd, chibi, deformed, bad anatomy, extra limbs, pixel art, pixelated"
+NEGATIVE = "blurry, low quality, jpeg artifacts, watermark, text, signature, multiple characters, crowd, chibi, deformed, bad anatomy, extra limbs, pixel art, pixelated, furniture, desk, table, chair, room, interior, landscape, grass, floor, ground, scenery"
 
 # ─── Character Definitions ───────────────────────────────────
 
 CHARACTER_SPRITES = {
     "zeph/reading": {
-        "prompt": f"{ZEPH_BASE}, sitting cross-legged reading a large old book, warm candlelight, focused expression, cozy atmosphere, solid green background, full body visible, centered",
+        "prompt": f"{ZEPH_BASE}, standing holding an open book in both hands reading, looking down at book, focused expression, full body visible, centered, solid magenta background, simple flat color background, no furniture, no environment",
         "size": (256, 256),
     },
     "zeph/writing": {
-        "prompt": f"{ZEPH_BASE}, sitting at wooden desk writing with feather quill pen, inkwell, parchment, concentrated expression, warm lighting, solid green background, full body visible, centered",
+        "prompt": f"{ZEPH_BASE}, standing holding a quill pen writing in a small notebook, concentrated expression, full body visible, centered, solid magenta background, simple flat color background, no furniture, no environment",
         "size": (256, 256),
     },
     "zeph/sleeping": {
-        "prompt": f"{ZEPH_BASE}, sleeping peacefully curled up on his side, eyes closed, relaxed expression, soft lighting, solid green background, full body visible, centered",
+        "prompt": f"{ZEPH_BASE}, standing with eyes closed head tilted down, arms hanging relaxed at sides, sleepy peaceful expression, full body visible, centered, solid magenta background, simple flat color background, no furniture, no environment",
         "size": (256, 256),
     },
     "zeph/eating": {
-        "prompt": f"{ZEPH_BASE}, sitting at small wooden table eating from a bowl, simple meal, relaxed, warm firelight, solid green background, full body visible, centered",
+        "prompt": f"{ZEPH_BASE}, standing holding a small bowl in one hand eating with spoon in other hand, casual expression, full body visible, centered, solid magenta background, simple flat color background, no furniture, no environment",
         "size": (256, 256),
     },
     "zeph/magic": {
-        "prompt": f"{ZEPH_BASE}, standing with hands raised casting magic spell, glowing magical energy around hands, mystical aura, dramatic lighting, solid green background, full body visible, centered",
+        "prompt": f"{ZEPH_BASE}, standing with both hands raised casting glowing magic spell, magical sparkles and energy around hands, dramatic pose, full body visible, centered, solid magenta background, simple flat color background, no furniture, no environment",
         "size": (256, 256),
     },
     "zeph/walking": {
-        "prompt": f"{ZEPH_BASE}, walking naturally mid-stride to the right, relaxed posture, windswept hair, solid green background, full body visible, centered",
+        "prompt": f"{ZEPH_BASE}, walking mid-stride to the right, natural relaxed walking pose, arms swinging slightly, full body visible, centered, solid magenta background, simple flat color background, no furniture, no environment",
         "size": (256, 256),
     },
     "zeph/sitting": {
-        "prompt": f"{ZEPH_BASE}, sitting on the ground relaxed, one knee up, looking at the sky, peaceful contemplative expression, solid green background, full body visible, centered",
+        "prompt": f"{ZEPH_BASE}, sitting cross-legged on ground, hands on knees, peaceful contemplative expression, looking slightly up, full body visible, centered, solid magenta background, simple flat color background, no furniture, no environment",
         "size": (256, 256),
     },
     "briar/sleeping": {
-        "prompt": f"{BRIAR_BASE}, sleeping curled up in a ball, peaceful, warm lighting, solid green background, centered",
+        "prompt": f"{BRIAR_BASE}, sleeping curled up in a ball, peaceful, eyes closed, solid magenta background, simple flat color background, no furniture, no environment, centered",
         "size": (256, 160),
     },
     "briar/sitting": {
-        "prompt": f"{BRIAR_BASE}, sitting upright looking alert, tongue slightly out, tail relaxed, solid green background, centered",
+        "prompt": f"{BRIAR_BASE}, sitting upright looking alert, tongue slightly out, tail relaxed, solid magenta background, simple flat color background, no furniture, no environment, centered",
         "size": (256, 160),
     },
     "briar/following": {
-        "prompt": f"{BRIAR_BASE}, trotting walking to the right, happy expression, tail wagging, solid green background, centered",
+        "prompt": f"{BRIAR_BASE}, trotting walking to the right, happy expression, tail wagging up, solid magenta background, simple flat color background, no furniture, no environment, centered",
         "size": (256, 160),
     },
 }
@@ -296,16 +296,20 @@ def generate_idle_frames(name, base_img, prompt, size, num_frames=3):
 
 
 def remove_bg(img):
-    """Remove green background using HSV color space."""
+    """Remove magenta background using HSV color space."""
     data = img.getdata()
     new_data = []
     for pixel in data:
         r, g, b, a = pixel
         h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
         hue_deg = h * 360
-        is_green = (70 < hue_deg < 170) and (s > 0.15) and (v > 0.15)
-        is_edge = (s < 0.08) and (v > 0.88)
-        if is_green or is_edge:
+        # Magenta hue range: roughly 270-330 degrees (pink/magenta/fuchsia)
+        is_magenta = (270 < hue_deg < 340) and (s > 0.2) and (v > 0.3)
+        # Also catch near-white edges from anti-aliasing against magenta
+        is_pale_magenta = (270 < hue_deg < 340) and (s > 0.05) and (v > 0.85)
+        # Catch pure white/near-white background areas
+        is_white = (s < 0.05) and (v > 0.92)
+        if is_magenta or is_pale_magenta or is_white:
             new_data.append((0, 0, 0, 0))
         else:
             new_data.append(pixel)
