@@ -71,7 +71,7 @@ CHARACTER_SPRITES = {
         "size": (256, 256),
     },
     "briar/sleeping": {
-        "prompt": f"{BRIAR_BASE}, sleeping curled up in a ball, peaceful, eyes closed, solid magenta background, simple flat color background, no furniture, no environment, centered",
+        "prompt": f"anime illustration, single large wolfhound dog lying down sleeping, curled up, shaggy grey-brown fur, torn ear, eyes closed, peaceful, simple flat magenta background, white background, centered, no props",
         "size": (256, 160),
     },
     "briar/sitting": {
@@ -296,26 +296,10 @@ def generate_idle_frames(name, base_img, prompt, size, num_frames=3):
 
 
 def remove_bg(img):
-    """Remove magenta background using HSV color space."""
-    data = img.getdata()
-    new_data = []
-    for pixel in data:
-        r, g, b, a = pixel
-        h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
-        hue_deg = h * 360
-        # Magenta hue range: roughly 270-330 degrees (pink/magenta/fuchsia)
-        is_magenta = (270 < hue_deg < 340) and (s > 0.2) and (v > 0.3)
-        # Also catch near-white edges from anti-aliasing against magenta
-        is_pale_magenta = (270 < hue_deg < 340) and (s > 0.05) and (v > 0.85)
-        # Catch pure white/near-white background areas
-        is_white = (s < 0.05) and (v > 0.92)
-        if is_magenta or is_pale_magenta or is_white:
-            new_data.append((0, 0, 0, 0))
-        else:
-            new_data.append(pixel)
-
-    result = Image.new("RGBA", img.size)
-    result.putdata(new_data)
+    """Remove background using rembg AI model — much more reliable than chroma key."""
+    from rembg import remove
+    # rembg works on PIL images directly
+    result = remove(img)
     return result
 
 
